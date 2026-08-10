@@ -1,0 +1,503 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display:
+    "Inter", "SF Pro Display", "Segoe UI Variable Display", "PingFang SC", "Microsoft YaHei",
+    sans-serif;
+  --font-body:
+    "Inter", "SF Pro Text", "Segoe UI Variable Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+
+  --animate-fade-up: fade-up 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-pop-in: pop-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-modal-in: modal-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-veil-in: veil-in 0.24s ease-out both;
+  --animate-shimmer: shimmer 1.6s linear infinite;
+  --animate-blink: blink 1.1s ease-in-out infinite;
+
+  @keyframes fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes pop-in {
+    from {
+      opacity: 0;
+      transform: scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+  /* 弹层卡片入场：translateY(8px) scale(0.98) → none，240ms ease-lux（任务 #108 P2） */
+  @keyframes modal-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+  /* 弹层遮罩淡入（任务 #108 P2） */
+  @keyframes veil-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes shimmer {
+    from {
+      background-position: -200% 0;
+    }
+    to {
+      background-position: 200% 0;
+    }
+  }
+  @keyframes blink {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.25;
+    }
+  }
+}
+
+/* ===========================================================================
+ * xBloom 桌面工作台令牌 —— 亮色「Porcelain」/ 暗色「Graphite」
+ * 全部经 CSS 变量化，组件一律引用 var(--*)，不写死色值。
+ * 亮色：Vercel 式多层阴影栈 + 暖纸留白；暗色：espresso 黑 + 香槟金，
+ *      层级靠表面阶梯（--bg-card / --bg-card-2）与发丝线，卡片顶部 inset 高光。
+ * ========================================================================= */
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* 动效令牌（任务 #108）：入场 ease-lux / 微交互 ease-snap */
+  --ease-lux: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-snap: cubic-bezier(0.2, 0, 0, 1);
+  --dur-fast: 150ms;
+  --dur-base: 240ms;
+  --dur-slow: 400ms;
+
+  --bg-page: #eef0f2;
+  --bg-base: #f5f6f7;
+  --bg-card: #ffffff;
+  --bg-card-2: #f8f8f7;
+  --bg-card-hover: #f4f4f2;
+  --bg-inset: #f1f2f3;
+  --bg-brand: #e8e5df;
+  --bg-canvas: #f7f7f6;
+  --bg-sidebar: #f3f4f5;
+
+  --tx-1: #17191c;
+  --tx-2: #4f555e;
+  --tx-3: #7d848d;
+
+  --line: rgba(22, 25, 29, 0.1);
+  --line-strong: rgba(22, 25, 29, 0.18);
+
+  /* 主按钮黑白化（暖近黑底） */
+  --btn-bg: #1b1d20;
+  --btn-bg-hover: #08090a;
+  --btn-fg: #ffffff;
+
+  /* 咖啡金：品牌资产，仅曲线 / 选中态 / 点缀 */
+  --acc: #a76428;
+  --acc-strong: #874d1d;
+  --acc-soft: rgba(167, 100, 40, 0.1);
+  --acc-line: rgba(167, 100, 40, 0.34);
+  --acc-on: #ffffff;
+  --acc-glow: rgba(180, 122, 51, 0.28); /* 主按钮 hover 金光 */
+
+  --sage: #3e8e5a;
+  --sage-deep: #357a4d;
+  --sage-soft: rgba(62, 142, 90, 0.1);
+
+  /* 小红书品牌色（任务 #126）：仅用于 XhsAccount 品牌标识 */
+  --xhs-brand: #ff2442;
+  --xhs-brand-soft: rgba(255, 36, 66, 0.08);
+
+  --ok: #3e8e5a;
+  --warn: #b47a33;
+  --bad: #c0453e;
+
+  /* 曲线语义色 */
+  --curve-temp: #b47a33; /* 水温 */
+  --curve-water: #4e8d77; /* 累计水量 */
+  --curve-flow: #8f8a80; /* 流速 */
+  --curve-bypass: #5f7db0; /* 旁路水 */
+
+  --chart-grid: rgba(26, 22, 15, 0.06);
+  --chart-axis: #9a9080;
+  --tooltip-bg: #fffdf9;
+
+  --ring: rgba(30, 34, 39, 0.1);
+
+  /* Vercel 式多层阴影栈（任务 #108 P0） */
+  --shadow-card: 0 1px 2px rgba(18, 21, 25, 0.04), 0 6px 18px -16px rgba(18, 21, 25, 0.25);
+  --shadow-pop: 0 0 0 1px rgba(18, 21, 25, 0.06), 0 14px 34px -14px rgba(18, 21, 25, 0.28);
+
+  /* 卡片顶部 inset 高光（Linear 手法）：亮色下为微白顶光 */
+  --edge-highlight: rgba(255, 255, 255, 0.65);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg-page: #0c0e11;
+  --bg-base: #101216;
+  --bg-card: #171a1f;
+  --bg-card-2: #1c2026;
+  --bg-card-hover: #21262d;
+  --bg-inset: #111419;
+  --bg-brand: #211b16;
+  --bg-canvas: #0f1216;
+  --bg-sidebar: #12151a;
+
+  --tx-1: #f0f2f4;
+  --tx-2: #b4bac2;
+  --tx-3: #7f8791;
+
+  /* Linear 发丝线 */
+  --line: rgba(235, 239, 244, 0.1);
+  --line-strong: rgba(235, 239, 244, 0.18);
+
+  /* 暗色下主按钮翻转为白底黑字 */
+  --btn-bg: #f5f4f0;
+  --btn-bg-hover: #ffffff;
+  --btn-fg: #111110;
+
+  /* 香槟金（任务 #108：暗色主战场） */
+  --acc: #d09558;
+  --acc-strong: #e3ab6c;
+  --acc-soft: rgba(208, 149, 88, 0.13);
+  --acc-line: rgba(208, 149, 88, 0.34);
+  --acc-on: #171003;
+  --acc-glow: rgba(220, 169, 99, 0.35); /* 暗色下金色 focus/按钮光晕 */
+
+  --sage: #a8c686;
+  --sage-deep: #c9d5b8;
+  --sage-soft: rgba(168, 198, 134, 0.12);
+
+  /* 小红书品牌色（任务 #126）：暗色下微调亮度 */
+  --xhs-brand: #ff4b66;
+  --xhs-brand-soft: rgba(255, 75, 102, 0.12);
+
+  --ok: #a8c686;
+  --warn: #e5b96b;
+  --bad: #d47b6a;
+
+  --curve-temp: #dca963;
+  --curve-water: #7fb2a0;
+  --curve-flow: #a8a29e;
+  --curve-bypass: #8fa3c8;
+
+  --chart-grid: rgba(236, 227, 213, 0.07);
+  --chart-axis: #78716c;
+  --tooltip-bg: rgba(20, 17, 16, 0.97);
+
+  --ring: rgba(236, 227, 213, 0.14);
+
+  /* 暗色几乎不用投影：层级靠表面阶梯 + 发丝线，仅保留极轻落影 */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35), 0 12px 30px -24px rgba(0, 0, 0, 0.9);
+  --shadow-pop: 0 0 0 1px rgba(235, 239, 244, 0.08), 0 24px 48px -16px rgba(0, 0, 0, 0.7);
+
+  /* 卡片顶部 inset 高光：rgba(255,250,240,0.05)（Linear 关键手法） */
+  --edge-highlight: rgba(255, 250, 240, 0.05);
+}
+
+html {
+  background-color: var(--bg-page);
+}
+
+body {
+  background-color: var(--bg-page);
+  color: var(--tx-1);
+  font-family: var(--font-body);
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  transition:
+    background-color 0.25s ease,
+    color 0.25s ease;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* 数字一律等宽表格数字 */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+::selection {
+  background: rgba(180, 122, 51, 0.22);
+  color: var(--tx-1);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--tx-3) 38%, transparent) transparent;
+}
+
+/* 键盘焦点环 */
+:focus-visible {
+  outline: 2px solid var(--tx-1);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+ * 眉标（eyebrow）：统一所有小标签 —— 11px / uppercase / 0.08em 字距（任务 #108 P1）
+ * ------------------------------------------------------------------------- */
+.eyebrow {
+  font-size: 11px;
+  line-height: 1.3;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--tx-3);
+}
+/* 状态徽章变体（任务 #114）：进行中状态 chip（「注水中」/「浸泡等待」）沿用 .eyebrow
+   字号/字距/大写规范，仅色相换为 acc 保持活跃态强调；var 令牌在 brewguide-immersive
+   恒定暗色作用域下同样有定义，无需额外覆写 */
+.eyebrow--acc {
+  color: var(--acc);
+}
+
+/* ---------------------------------------------------------------------------
+ * 卡片表面：多层阴影栈 + 顶部 inset 发丝高光（任务 #108 P0）
+ * ------------------------------------------------------------------------- */
+.card-surface {
+  box-shadow:
+    var(--shadow-card),
+    inset 0 1px 0 var(--edge-highlight);
+}
+
+/* 专业桌面 App shell：大屏三区独立滚动，中间是配方画布，右侧是同步与历史。 */
+.workbench-shell {
+  background: var(--bg-page);
+}
+
+.workspace-column {
+  min-width: 0;
+}
+
+.workspace-canvas {
+  background-color: var(--bg-canvas);
+  background-image: radial-gradient(
+    color-mix(in srgb, var(--tx-3) 17%, transparent) 0.65px,
+    transparent 0.65px
+  );
+  background-size: 18px 18px;
+}
+
+.workspace-rail {
+  background: var(--bg-sidebar);
+}
+
+.brew-empty-canvas {
+  background:
+    radial-gradient(
+      circle at 50% 28%,
+      color-mix(in srgb, var(--acc) 10%, transparent),
+      transparent 34%
+    ),
+    linear-gradient(to bottom, color-mix(in srgb, var(--bg-card) 85%, transparent), var(--bg-card));
+}
+
+@media (min-width: 1280px) {
+  .workbench-shell {
+    height: calc(100vh - 3.5rem);
+    overflow: hidden;
+  }
+
+  .workspace-column {
+    height: 100%;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 16px;
+  }
+
+  .workspace-column + .workspace-column {
+    border-left: 1px solid var(--line);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 折叠展开：grid-template-rows 0fr → 1fr，400ms ease-lux（任务 #108 P2，纯 CSS）
+ * ------------------------------------------------------------------------- */
+.collapser {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--dur-slow) var(--ease-lux);
+}
+.collapser[data-open="true"] {
+  grid-template-rows: 1fr;
+}
+.collapser > .collapser-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * BrewGuide 计时器恒定暗色沉浸（任务 #108 P1，仪式感例外设计）：
+ * 无论当前主题，覆盖层一律 espresso 黑 + 顶部径向金光晕，令牌局部重写。
+ * ------------------------------------------------------------------------- */
+.brewguide-immersive {
+  color-scheme: dark;
+
+  --bg-page: #0b0908;
+  --bg-card: #141110;
+  --bg-card-2: #1a1614;
+  --bg-card-hover: #1d1917;
+  --bg-inset: #0e0b0a;
+
+  --tx-1: #ece7dd;
+  --tx-2: #b3aa9c;
+  --tx-3: #8a8172;
+
+  --line: rgba(236, 227, 213, 0.1);
+  --line-strong: rgba(236, 227, 213, 0.18);
+
+  --btn-bg: #ece7dd;
+  --btn-bg-hover: #ffffff;
+  --btn-fg: #14100b;
+
+  --acc: #dca963;
+  --acc-strong: #e8be7a;
+  --acc-soft: rgba(220, 169, 99, 0.12);
+  --acc-line: rgba(220, 169, 99, 0.32);
+  --acc-on: #171003;
+
+  --sage: #a8c686;
+  --sage-deep: #c9d5b8;
+  --sage-soft: rgba(168, 198, 134, 0.12);
+
+  --ok: #a8c686;
+  --warn: #e5b96b;
+  --bad: #d47b6a;
+
+  --curve-water: #7fb2a0;
+
+  --edge-highlight: rgba(255, 250, 240, 0.05);
+
+  color: #ece7dd;
+  background: radial-gradient(60% 40% at 50% 0%, rgba(220, 169, 99, 0.1), transparent 70%), #0b0908;
+}
+
+/* ---------------------------------------------------------------------------
+ * 骨架屏 shimmer
+ * ------------------------------------------------------------------------- */
+.skeleton {
+  background: linear-gradient(90deg, #efeae0 25%, #f7f3ea 50%, #efeae0 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+  border-radius: 8px;
+}
+:root[data-theme="dark"] .skeleton {
+  background: linear-gradient(90deg, #17130f 25%, #1f1a15 50%, #17130f 75%);
+  background-size: 200% 100%;
+}
+
+/* ---------------------------------------------------------------------------
+ * 滑杆（xslider）：黑色填充轨道（暗色反白）+ 圆形拇指
+ * ------------------------------------------------------------------------- */
+input[type="range"].xslider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 20px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"].xslider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--tx-1) 0%,
+    var(--tx-1) var(--fill, 50%),
+    var(--line-strong) var(--fill, 50%)
+  );
+}
+input[type="range"].xslider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: -6px;
+  height: 16px;
+  width: 16px;
+  border-radius: 999px;
+  background: var(--tx-1);
+  border: 3px solid var(--bg-card);
+  box-shadow: 0 0 0 1px var(--line-strong);
+  transition: transform 0.15s var(--ease-snap);
+}
+input[type="range"].xslider::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+input[type="range"].xslider::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line-strong);
+}
+input[type="range"].xslider::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--tx-1);
+}
+input[type="range"].xslider::-moz-range-thumb {
+  height: 14px;
+  width: 14px;
+  border-radius: 999px;
+  background: var(--tx-1);
+  border: 3px solid var(--bg-card);
+  box-shadow: 0 0 0 1px var(--line-strong);
+}
+
+/* 原生取色器融入卡片 */
+input[type="color"].xcolor {
+  -webkit-appearance: none;
+  appearance: none;
+  border: none;
+  padding: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: none;
+  cursor: pointer;
+}
+input[type="color"].xcolor::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+input[type="color"].xcolor::-webkit-color-swatch {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+}
+
+/* ---------------------------------------------------------------------------
+ * 动效降级：prefers-reduced-motion 全量收敛（任务 #108 P3）
+ * ------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

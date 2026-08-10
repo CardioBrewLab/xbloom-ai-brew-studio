@@ -1,0 +1,32 @@
+{
+  "name": "@xbloom/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "xBloom AI 冲煮工作台前端（Vite + React + Tailwind）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "tsx --test \"test/*.test.ts\"",
+    "test:integration": "node test/t116-content-contract.test.mjs"
+  },
+  "dependencies": {
+    "@xbloom/shared": "*",
+    "echarts": "^6.0.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^4.0.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.11",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "tailwindcss": "^4.1.11",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.4"
+  }
+}

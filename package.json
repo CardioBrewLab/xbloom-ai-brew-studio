@@ -1,0 +1,47 @@
+{
+  "name": "xbloom-ai-brew-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "xBloom AI 冲煮工作台 —— LLM 配方生成 / 云端同步 / BLE 实验",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "workspaces": [
+    "shared",
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "npm run build --workspace shared && npm run dev --workspace server",
+    "dev:server": "npm run dev --workspace server",
+    "dev:web": "npm run dev --workspace web",
+    "build": "npm run build --workspace shared && npm run build --workspace server && npm run build --workspace web",
+    "start": "node server/dist/index.js",
+    "test": "npm run build --workspace shared && npm run test --workspace server",
+    "test:web": "npm run build --workspace shared && npm run test --workspace web",
+    "test:all": "npm run build --workspace shared && npm run test --workspace server && npm run test --workspace web",
+    "check:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-release-safety.ps1",
+    "verify:cloudflare": "npm ci --prefix cloudflare && npm --prefix cloudflare test && npm --prefix cloudflare run check",
+    "verify": "npm run format:check && npm run check:release && npm run test:all && npm run build && npm run verify:cloudflare",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "prettier": "^3.9.6"
+  },
+  "overrides": {
+    "nanoid": "^3.3.17",
+    "@mapbox/node-pre-gyp": "^2.0.3",
+    "node-gyp": "^13.0.1",
+    "tar": "^7.5.22",
+    "cacache": "^21.0.1",
+    "make-fetch-happen": "^16.0.1"
+  },
+  "allowScripts": {
+    "@abandonware/bluetooth-hci-socket@0.5.3-12": true,
+    "@abandonware/noble@1.9.2-26": true,
+    "esbuild@0.28.2": true,
+    "usb@2.18.0": true
+  }
+}

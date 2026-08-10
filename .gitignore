@@ -1,0 +1,43 @@
+﻿# Dependencies and build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+cloudflare/wrangler.generated.jsonc
+cloudflare/.wrangler/
+
+# User data: recipes, beans, xBloom sessions, encrypted model settings and logs
+data/
+
+# Portable runtime installed by install-windows.ps1
+.runtime/
+
+# Xiaohongshu runtime, account sessions and downloaded upstream binaries
+tools/xhs-mcp/*.exe
+!tools/xhs-mcp/bundled/
+!tools/xhs-mcp/bundled/xiaohongshu-mcp-windows-amd64-fixed.exe
+tools/xhs-mcp/*.zip
+tools/xhs-mcp/runtime/
+tools/xhs-mcp/cookies.json*
+tools/xhs-mcp/*-result.json
+tools/xhs-mcp/qrcode*
+tools/xhs-mcp/*.log
+tools/xhs-mcp/data/
+tools/xhs-mcp/browser-data/
+
+# Local QA output
+.codex/
+.tmp-verify/
+*.log
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

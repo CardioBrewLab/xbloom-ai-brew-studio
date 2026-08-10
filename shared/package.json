@@ -1,0 +1,28 @@
+{
+  "name": "@xbloom/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./recipe-schema": {
+      "types": "./dist/recipe-schema.d.ts",
+      "default": "./dist/recipe-schema.js"
+    },
+    "./safety": {
+      "types": "./dist/safety.d.ts",
+      "default": "./dist/safety.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "zod": "^4.0.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

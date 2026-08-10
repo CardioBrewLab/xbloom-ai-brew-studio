@@ -1,0 +1,29 @@
+name: 功能建议
+description: 从真实冲煮流程出发提出改进。
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: 现在的冲煮流程
+      description: 请描述你目前如何从选豆走到手机 xBloom App。
+    validations:
+      required: true
+  - type: textarea
+    id: friction
+    attributes:
+      label: 最费时间或最容易出错的一步
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 希望怎样改进
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: 与现有功能的关系
+      description: 说明是否涉及接口、数据、登录、上传或 BLE 行为。

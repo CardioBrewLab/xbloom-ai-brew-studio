@@ -1,0 +1,7 @@
+node_modules/
+dist/
+data/
+.runtime/
+.codex/
+package-lock.json
+tools/xhs-mcp/*.exe

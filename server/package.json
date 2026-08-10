@@ -1,0 +1,28 @@
+{
+  "name": "@xbloom/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "xBloom AI 冲煮工作台后端（Express + tsx）",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc && node -e \"const fs=require('node:fs');fs.cpSync('src/prompts','dist/prompts',{recursive:true});fs.cpSync('src/knowledge','dist/knowledge',{recursive:true});console.log('[build] prompts/knowledge copied to dist')\"",
+    "test": "tsx --test \"test/*.test.ts\""
+  },
+  "dependencies": {
+    "@xbloom/shared": "*",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "undici": "^7.11.0",
+    "zod": "^4.0.5"
+  },
+  "optionalDependencies": {
+    "@abandonware/noble": "^1.9.2-26"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.0.10",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildLlmSettingsUpdate, normalizeSettingsBaseUrl } from "../src/lib/llm-settings.js";
+import {
+  buildLlmSettingsUpdate,
+  normalizeSettingsBaseUrl,
+  settingsBaseUrlOrigin,
+} from "../src/lib/llm-settings.js";
 
 describe("模型接口设置表单", () => {
   it("地址去掉首尾空白和尾部斜杠，同时保留本机 HTTP 网关", () => {
@@ -15,6 +19,12 @@ describe("模型接口设置表单", () => {
     assert.throws(() => normalizeSettingsBaseUrl("file:///tmp/api"));
     assert.throws(() => normalizeSettingsBaseUrl("https://u:p@example.com/v1"));
     assert.throws(() => normalizeSettingsBaseUrl("https://example.com/v1?key=x"));
+  });
+
+  it("未配置账号的空地址不阻塞首次保存", () => {
+    assert.equal(settingsBaseUrlOrigin(""), "");
+    assert.equal(settingsBaseUrlOrigin(undefined), "");
+    assert.equal(settingsBaseUrlOrigin("https://gateway.example/v1"), "https://gateway.example");
   });
 
   it("空白 Key 不进入请求，表示保留当前密钥", () => {

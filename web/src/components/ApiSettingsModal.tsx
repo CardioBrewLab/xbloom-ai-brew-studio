@@ -6,7 +6,11 @@ import {
   type ModelProvider,
   type ModelProviderPreset,
 } from "../lib/api.js";
-import { buildLlmSettingsUpdate, type LlmSettingsDraft } from "../lib/llm-settings.js";
+import {
+  buildLlmSettingsUpdate,
+  settingsBaseUrlOrigin,
+  type LlmSettingsDraft,
+} from "../lib/llm-settings.js";
 import { btnGhost, btnPrimary, Field, inputCls, Modal, Spinner } from "./ui.js";
 
 const EMPTY_DRAFT: LlmSettingsDraft = {
@@ -135,8 +139,8 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
     setSaved(false);
     let payload;
     try {
-      const currentOrigin = settings ? new URL(settings.baseUrl).origin : "";
-      const nextOrigin = new URL(draft.baseUrl.trim()).origin;
+      const currentOrigin = settingsBaseUrlOrigin(settings?.baseUrl);
+      const nextOrigin = settingsBaseUrlOrigin(draft.baseUrl);
       const reusesSavedKey = Boolean(settings?.apiKeyConfigured) && !draft.apiKey.trim();
       const endpointChanged = Boolean(currentOrigin && currentOrigin !== nextOrigin);
       let confirmed = false;

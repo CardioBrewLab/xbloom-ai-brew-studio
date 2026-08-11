@@ -46,6 +46,12 @@ export function normalizeSettingsBaseUrl(value: string): string {
   return url.toString().replace(/\/+$/, "");
 }
 
+/** Empty means “not configured”; a real endpoint still receives strict URL validation. */
+export function settingsBaseUrlOrigin(value?: string): string {
+  if (!value?.trim()) return "";
+  return new URL(normalizeSettingsBaseUrl(value)).origin;
+}
+
 export function buildLlmSettingsUpdate(
   draft: LlmSettingsDraft,
   confirmEndpointChange = false,

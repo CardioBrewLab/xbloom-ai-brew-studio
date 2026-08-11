@@ -13,6 +13,7 @@
 - Cross-operation save idempotency for automatic, manual, paired and cloud-bound saves.
 - Explicit bean-library selection precedence and prevention of duplicate bean creation.
 - Local watchdog startup path and release configuration defaults.
+- First-account model configuration when the saved endpoint is still empty.
 
 ## Review loop
 
@@ -28,7 +29,7 @@ Final independent review: `PASS`, zero high/medium issues.
 
 - `npm run verify`: PASS.
 - Server: 568/568.
-- Web: 164/164.
+- Web: 165/165.
 - Hosted URL checks: 8/8.
 - Edge proxy checks: 6/6.
 - Relay: 3/3.

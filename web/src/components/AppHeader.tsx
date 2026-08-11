@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { CloudStatus } from "../lib/api.js";
+import type { AuthSession, CloudStatus } from "../lib/api.js";
 import XhsAccount from "./XhsAccount.js";
 import { StatusDot } from "./ui.js";
 
@@ -21,6 +21,9 @@ export interface AppHeaderProps {
   xhsExpired: boolean;
   onClearXhsExpired: () => void;
   onOpenSettings: () => void;
+  hosted: boolean;
+  account: AuthSession | null;
+  onOpenAccount: () => void;
   theme: "dark" | "light";
   onToggleTheme: () => void;
 }
@@ -35,6 +38,9 @@ export default function AppHeader({
   xhsExpired,
   onClearXhsExpired,
   onOpenSettings,
+  hosted,
+  account,
+  onOpenAccount,
   theme,
   onToggleTheme,
 }: AppHeaderProps) {
@@ -123,7 +129,8 @@ export default function AppHeader({
           <span className="hidden items-center gap-3 rounded-lg border border-[var(--line)] bg-[var(--bg-inset)] px-2.5 py-1.5 lg:flex">
             <span className="flex items-center gap-1.5">
               <StatusDot tone={backendUp ? "ok" : "bad"} pulse={backendUp} />
-              本地{backendUp ? "已连接" : "已离线"}
+              {hosted ? "云端" : "本地"}
+              {backendUp ? "已连接" : "已离线"}
             </span>
             <span className="h-3 w-px bg-[var(--line-strong)]" aria-hidden />
             <span className="flex items-center gap-1.5">
@@ -138,6 +145,18 @@ export default function AppHeader({
           <span className="hidden md:block">
             <XhsAccount expiredAlert={xhsExpired} onClearExpired={onClearXhsExpired} />
           </span>
+          {hosted && (
+            <button
+              type="button"
+              onClick={onOpenAccount}
+              className="hidden h-8 max-w-28 items-center rounded-lg border border-[var(--line)] px-2.5 text-xs font-medium text-[var(--tx-2)] transition-colors hover:border-[var(--line-strong)] hover:text-[var(--tx-1)] sm:flex"
+              title={account?.authenticated ? "个人账号" : "注册或登录"}
+            >
+              <span className="truncate">
+                {account?.authenticated ? account.user?.displayName : "登录"}
+              </span>
+            </button>
+          )}
           <button
             type="button"
             onClick={onOpenSettings}

@@ -7,6 +7,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { detectModelProvider } from "@xbloom/shared/model-provider";
 import { config, type AppConfig } from "../config.js";
 import { atomicWriteJson } from "./data-io.js";
 import { withFileLock } from "./store-mutex.js";
@@ -89,6 +90,7 @@ const ApiKeySchema = z
 
 export const LlmSettingsPatchSchema = z
   .object({
+    provider: z.enum(["openai-compatible", "anthropic", "gemini"]).optional(),
     baseUrl: BaseUrlSchema.optional(),
     model: RequiredModelSchema.optional(),
     fallbackModel: OptionalModelSchema.optional(),
@@ -121,8 +123,9 @@ type EncryptedSecret = z.infer<typeof EncryptedSecretSchema>;
 
 const StoredLlmSettingsFileSchema = z
   .object({
-    version: z.literal(3),
+    version: z.union([z.literal(3), z.literal(4)]),
     updatedAt: z.string(),
+    provider: z.enum(["openai-compatible", "anthropic", "gemini"]).optional(),
     baseUrl: BaseUrlSchema.optional(),
     model: RequiredModelSchema.optional(),
     fallbackModel: OptionalModelSchema.optional(),
@@ -133,8 +136,9 @@ const StoredLlmSettingsFileSchema = z
   .strict();
 
 export interface StoredLlmSettings {
-  version: 3;
+  version: 3 | 4;
   updatedAt: string;
+  provider?: "openai-compatible" | "anthropic" | "gemini";
   baseUrl?: string;
   model?: string;
   fallbackModel?: string;
@@ -144,6 +148,7 @@ export interface StoredLlmSettings {
 }
 
 export interface PublicLlmSettings {
+  provider: "openai-compatible" | "anthropic" | "gemini";
   baseUrl: string;
   model: string;
   fallbackModel: string;
@@ -220,10 +225,12 @@ export function readStoredLlmSettings(file: string = LLM_SETTINGS_FILE): StoredL
     throw error;
   }
   const stored = StoredLlmSettingsFileSchema.parse(JSON.parse(raw) as unknown);
+  const baseUrl = stored.baseUrl;
   return {
-    version: 3,
+    version: stored.version,
     updatedAt: stored.updatedAt,
-    ...(stored.baseUrl !== undefined ? { baseUrl: stored.baseUrl } : {}),
+    ...(baseUrl !== undefined ? { baseUrl } : {}),
+    provider: stored.provider ?? detectModelProvider(baseUrl ?? ENV_LLM_DEFAULTS.baseUrl),
     ...(stored.model !== undefined ? { model: stored.model } : {}),
     ...(stored.fallbackModel !== undefined ? { fallbackModel: stored.fallbackModel } : {}),
     ...(stored.thirdModel !== undefined ? { thirdModel: stored.thirdModel } : {}),
@@ -244,6 +251,7 @@ export function applyStoredLlmSettings(
 ): void {
   Object.assign(target, defaults);
   if (!stored) return;
+  if (stored.provider !== undefined) target.provider = stored.provider;
   for (const key of [
     "baseUrl",
     "apiKey",
@@ -264,6 +272,7 @@ export function publicLlmSettings(
   localOverrideValid = true,
 ): PublicLlmSettings {
   return {
+    provider: target.provider,
     baseUrl: target.baseUrl,
     model: target.model,
     fallbackModel: target.fallbackModel,
@@ -314,8 +323,9 @@ export function currentLlmSettings(
 
 function writeStoredLlmSettings(file: string, settings: StoredLlmSettings): void {
   atomicWriteJson(file, {
-    version: 3,
+    version: 4,
     updatedAt: settings.updatedAt,
+    ...(settings.provider !== undefined ? { provider: settings.provider } : {}),
     ...(settings.baseUrl !== undefined ? { baseUrl: settings.baseUrl } : {}),
     ...(settings.model !== undefined ? { model: settings.model } : {}),
     ...(settings.fallbackModel !== undefined ? { fallbackModel: settings.fallbackModel } : {}),
@@ -356,19 +366,26 @@ export async function updateLlmSettings(
       current = null;
     }
     const activeBaseUrl = current?.baseUrl ?? defaults.baseUrl;
+    const activeProvider = current?.provider ?? defaults.provider;
     const nextBaseUrl = patch.baseUrl ?? activeBaseUrl;
-    const endpointChanged = new URL(activeBaseUrl).origin !== new URL(nextBaseUrl).origin;
+    const nextProvider = patch.provider ?? activeProvider;
+    const connectionChanged = activeBaseUrl !== nextBaseUrl || activeProvider !== nextProvider;
     const wouldReuseSecret = Boolean(current?.apiKey ?? defaults.apiKey) && !patch.apiKey;
-    if (endpointChanged && wouldReuseSecret && !confirmEndpointChange) {
+    if (connectionChanged && wouldReuseSecret && !confirmEndpointChange) {
       throw new LlmEndpointConfirmationError();
     }
 
     const next: StoredLlmSettings = {
-      version: 3,
+      version: 4,
       ...(current ?? {}),
       ...patch,
       updatedAt: new Date().toISOString(),
     };
+    if (connectionChanged && patch.apiKey && patch.fallbackApiKey === undefined) {
+      // 地址或协议切换时，旧兜底 Key 不再属于当前凭据边界；默认跟随本次新主 Key，
+      // 避免 Claude 命名模型把旧服务凭据发往新端点。
+      next.fallbackApiKey = patch.apiKey;
+    }
     writeStoredLlmSettings(file, next);
     applyStoredLlmSettings(next, target, defaults);
     return publicLlmSettings(target, next);

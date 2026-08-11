@@ -1,6 +1,6 @@
 {
   "name": "@xbloom/shared",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "exports": {
@@ -11,6 +11,18 @@
     "./safety": {
       "types": "./dist/safety.d.ts",
       "default": "./dist/safety.js"
+    },
+    "./model-provider": {
+      "types": "./dist/model-provider.d.ts",
+      "default": "./dist/model-provider.js"
+    },
+    "./xbloom-cloud-payload": {
+      "types": "./dist/xbloom-cloud-payload.d.ts",
+      "default": "./dist/xbloom-cloud-payload.js"
+    },
+    "./password-auth": {
+      "types": "./dist/password-auth.d.ts",
+      "default": "./dist/password-auth.js"
     }
   },
   "files": [

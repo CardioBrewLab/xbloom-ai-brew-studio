@@ -16,8 +16,10 @@ import recipesRouter from "./routes/recipes.js";
 import beansRouter from "./routes/beans.js";
 import settingsRouter from "./routes/settings.js";
 import xhsRouter from "./routes/xhs.js";
+import companionRouter from "./routes/companion.js";
+import { companionAccess } from "./lib/companion-access.js";
 
-export const VERSION = "0.1.1";
+export const VERSION = "0.2.0";
 
 // 在挂载生成路由前应用本机模型覆盖；只改变 LLM 客户端运行参数，不改变监听地址或部署。
 initializeLlmSettings();
@@ -72,6 +74,7 @@ const bleRouter = await tryImportRouter("./routes/ble.js"); // 任务 #5
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+app.use(companionAccess);
 
 /** 全局 JSON 解析错误中间件：非法请求体统一返回 {ok:false,message} */
 app.use((err: Error & { type?: string }, _req: Request, res: Response, next: NextFunction) => {
@@ -88,6 +91,7 @@ app.use(recipesRouter); // /api/recipes CRUD + 冲煮反馈（任务 #2 / #11）
 app.use(beansRouter); // /api/beans 豆库 CRUD（任务 #11）
 app.use("/api/settings", settingsRouter); // /api/settings/llm 本机模型接口设置
 app.use("/api/xhs", xhsRouter); // /api/xhs 小红书登录态/扫码续期（任务 #83）
+app.use("/api/companion", companionRouter); // 公网页面可选连接本机调研助手
 if (cloudRouter) app.use("/api/cloud", cloudRouter);
 if (bleRouter) app.use("/api/ble", bleRouter);
 
@@ -114,6 +118,9 @@ app.get("/api/config", (_req, res) => {
     models,
     defaultModel: config.llm.model,
     limits: SAFE_LIMITS,
+    deployment: "local",
+    authenticated: false,
+    modelConfigured: Boolean(config.llm.baseUrl && config.llm.model && config.llm.apiKey),
     // 云端区域（与 xbloom-cloud.isCnRegion 同逻辑；不直接 import 以保持云端模块可选）
     cloudRegion: (process.env.XBLOOM_REGION || "").trim().toLowerCase() === "cn" ? "cn" : "global",
   });

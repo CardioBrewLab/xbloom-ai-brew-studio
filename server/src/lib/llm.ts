@@ -14,6 +14,7 @@
  *   用 LLM_API_KEY（缺省回退）。模型 ID 一律从配置读取，不硬编码。
  */
 import { fetch } from "undici";
+import { generateModelText, type FetchLike } from "@xbloom/shared/model-provider";
 import { config } from "../config.js";
 
 const DEFAULT_LLM_REQUEST_TIMEOUT_MS = 120_000;
@@ -152,10 +153,16 @@ export function isTransientTransportError(err: unknown): boolean {
   );
 }
 
-/** 按模型选 key：Claude 系模型走兜底渠道 key，其余（GPT 系）走主 key */
+/** 原生 Claude/Gemini 协议始终使用当前主 key；兼容网关内的 Claude 模型可走兜底 key。 */
 export function keyForModel(model: string): string {
-  const { apiKey, fallbackApiKey } = config.llm;
-  if (model.toLowerCase().startsWith("claude") && fallbackApiKey) return fallbackApiKey;
+  const { apiKey, fallbackApiKey, provider } = config.llm;
+  if (
+    provider === "openai-compatible" &&
+    model.toLowerCase().startsWith("claude") &&
+    fallbackApiKey
+  ) {
+    return fallbackApiKey;
+  }
   return apiKey;
 }
 
@@ -234,6 +241,34 @@ async function* streamSingle(
   messages: ChatMessage[],
   opts: StreamChatOptions,
 ): AsyncGenerator<StreamChunk> {
+  const provider = config.llm.provider;
+  if (provider !== "openai-compatible") {
+    const requestSignal = llmRequestSignal(opts.signal);
+    let content: string;
+    try {
+      content = await generateModelText(
+        {
+          provider,
+          baseUrl: config.llm.baseUrl,
+          apiKey: keyForModel(model),
+          model,
+        },
+        messages,
+        {
+          fetcher: fetch as unknown as FetchLike,
+          signal: requestSignal,
+          allowLoopback: true,
+          temperature: samplingParams(model, opts).temperature,
+          maxTokens: opts.maxTokens,
+        },
+      );
+    } catch (error) {
+      throw timeoutError(model, requestSignal, opts.signal) ?? error;
+    }
+    // 原生 Claude/Gemini 先以完整正文块接入；上层 SSE 契约保持一致。
+    yield { type: "content", delta: content };
+    return;
+  }
   const url = `${config.llm.baseUrl.replace(/\/$/, "")}/chat/completions`;
   // GPT 系需显式开启 reasoning_effort 才会输出思考流（实测确认）
   const reasoningEffort =
@@ -330,6 +365,30 @@ async function completionSingle(
   messages: ChatMessage[],
   opts: CompletionOptions,
 ): Promise<string> {
+  const provider = config.llm.provider;
+  if (provider !== "openai-compatible") {
+    const requestSignal = llmRequestSignal(opts.signal);
+    try {
+      return await generateModelText(
+        {
+          provider,
+          baseUrl: config.llm.baseUrl,
+          apiKey: keyForModel(model),
+          model,
+        },
+        messages,
+        {
+          fetcher: fetch as unknown as FetchLike,
+          signal: requestSignal,
+          allowLoopback: true,
+          temperature: samplingParams(model, opts).temperature,
+          maxTokens: opts.maxTokens,
+        },
+      );
+    } catch (error) {
+      throw timeoutError(model, requestSignal, opts.signal) ?? error;
+    }
+  }
   const url = `${config.llm.baseUrl.replace(/\/$/, "")}/chat/completions`;
   const reasoningEffort =
     config.llm.reasoningEffort && model.toLowerCase().includes("gpt")

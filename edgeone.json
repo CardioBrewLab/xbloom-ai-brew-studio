@@ -1,0 +1,32 @@
+{
+  "name": "xbloom-ai-brew-studio",
+  "installCommand": "npm ci",
+  "buildCommand": "npm run build:shared && npm run build --workspace web",
+  "outputDirectory": "web/dist",
+  "nodeVersion": "22.17.1",
+  "rewrites": [
+    {
+      "source": "/*",
+      "destination": "/index.html"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/*",
+      "headers": [
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "strict-origin-when-cross-origin"
+        },
+        {
+          "key": "Permissions-Policy",
+          "value": "camera=(), microphone=(), geolocation=()"
+        }
+      ]
+    }
+  ]
+}

@@ -1,77 +1,119 @@
-# 发布到 GitHub
+# 发布和验收
 
-这份仓库已经包含许可证、CI、Release 打包、Issue/PR 模板、依赖更新和发布前凭据扫描。首次公开时按下面顺序操作。
+本文说明 0.2.0 Windows 安装包和多用户 Hosted 云端版的发布流程。它是发布检查清单，不是线上部署结果记录；最终发布说明请使用本次命令的真实输出。
 
-## 1. 发布前检查
+## 0.2 发布范围
+
+- Hosted 账号注册、登录和按账号隔离的数据。
+- 个人 BYOK 模型设置，支持 OpenAI/GPT、Claude、Kimi、DeepSeek、Qwen、Gemini 和自定义 OpenAI-compatible 端点。
+- 保存个人模型设置前进行模型发现和连接测试。
+- 每个用户独立的 xBloom 云端登录、配方上传和配方管理。
+- Hosted 用户可选的本地小红书助手。
+- EdgeOne 前端/API Relay 加 Cloudflare Worker/D1 的中国入口。
+- Windows 本地安装包，包含项目内运行时、本地 data、可选调研工具和可选 BLE 设置。
+
+## Maintainer 发布前检查
+
+在干净的发布分支上从仓库根目录执行。凭证放在当前检出版本和发布产物之外。
 
 ```powershell
 npm ci
 npm run verify
-npm run test:install
-npm audit
-git diff --cached --check
+git diff --check -- README.md cloudflare/README.md docs/CONFIGURATION.md docs/FEATURES.md docs/ARCHITECTURE.md docs/PUBLISHING.md CHANGELOG.md
 git status --short
 ```
 
-再确认 Git 实际跟踪内容中没有本机会话：
+本文刻意不写固定的验证数量。请把 `npm run verify` 的实际结果记录到发布记录中。打包前检查 `git status --short`，确保 `.env`、本地 data、运行时状态、Cookie 和生成的私密资料留在发布产物之外。
+
+仓库现有的发布检查也要运行：
 
 ```powershell
-git ls-files .env data tools/xhs-mcp
+npm run check:release
 ```
 
-预期只会看到 `tools/xhs-mcp` 下的两个 PowerShell 脚本与发布校验清单；`.env`、`data/`、Cookie、下载的 EXE 和日志都不会出现。
+发布门禁使用 `package.json` 中已有的 `verify` 和发布脚本；不要额外假设一个不存在的测试命令。
 
-## 2. 创建公开仓库
+## Hosted 云端部署
 
-在 GitHub 新建一个空仓库，例如 `xbloom-ai-brew-studio`。创建时不要额外勾选 README、License 或 `.gitignore`，本地版本已经齐全。
+### 默认的账号 BYOK
 
-使用 Git：
+默认 Cloudflare 部署使用每个账号自己的模型设置。用户注册和配置个人模型连接时，不需要部署者先准备共享模型密钥。
 
 ```powershell
-git remote add origin https://github.com/YOUR_ACCOUNT/xbloom-ai-brew-studio.git
-git push -u origin main
+npx wrangler login
+.\cloudflare\deploy-cloudflare.ps1
 ```
 
-也可以使用 GitHub CLI：
+常规升级时保持 `APP_SESSION_SECRET`、`APP_PASSWORD_PEPPER` 和 `APP_DATA_ENCRYPTION_KEY` 不变。三者分别用于会话签名、账号校验值的独立 pepper，以及加密用户模型 API Key/xBloom 外部会话载荷；都保存在 Worker 密钥存储中。
+
+### 可选共享模型（guest model）
+
+如果公开访客流程需要部署级备用连接，可以单独配置，并在发布说明中标明它属于部署运营者：
 
 ```powershell
-gh auth login
-gh repo create xbloom-ai-brew-studio --public --source . --remote origin --push
+.\cloudflare\deploy-cloudflare.ps1 `
+  -LlmBaseUrl https://YOUR_MODEL_HOST/v1 `
+  -LlmModel YOUR_MODEL `
+  -ConfigureSharedGuestModel
 ```
 
-## 3. 仓库设置
+guest 密钥由部署脚本通过安全输入读取，和账号个人 BYOK 分开保存。使用 `-SkipDeploy` 可以先做本地配置和 dry-run（演练）检查。
 
-建议在 GitHub 网页完成这些设置：
+### 中国入口
 
-1. **Settings → Code security and analysis**：开启 Secret scanning 与 Push protection；
-2. **Settings → Rules → Rulesets**：保护 `main`，要求 Pull Request 与 `CI / verify` 通过；
-3. **Settings → Actions → General**：允许仓库工作流运行，并允许 Release 工作流获得 `contents: write`；
-4. **Settings → Security → Private vulnerability reporting**：开启私密漏洞报告；
-5. 在仓库 About 中添加截图、项目描述和 `xbloom`、`coffee`、`react`、`typescript`、`windows` 等 Topics。
+按[中国部署说明](DEPLOY_CHINA.md)完成 EdgeOne 静态托管、`/api/*` Relay、`CLOUDFLARE_WORKER_ORIGIN`、`EDGE_PROXY_SECRET`、自定义域名以及 D1/Worker 验收。稳定的中国大陆域名需要已备案的自定义域名。
 
-## 4. 发布首个安装包
+## 发布产物验收
 
-确认 `main` 的 CI 通过后推送版本标签：
+### Windows 全新电脑矩阵
 
-```powershell
-git tag -a v0.1.1 -m "xBloom AI Brew Studio v0.1.1"
-git push origin v0.1.1
-```
+在全新的 Windows 用户配置文件或全新 Windows 电脑上运行安装包。至少覆盖一个包含空格和中文的路径，以及一个非开发目录的可写卷。项目路径应由安装包自己计算，不依赖维护者电脑的路径。
 
-`.github/workflows/release.yml` 会先在只读权限的验证任务中安装锁定依赖、执行全部测试和发布安全检查；通过后，独立的发布任务只归档已验证提交，不再执行仓库脚本，并生成：
+| 检查                              | 预期现象                                                                              |
+| --------------------------------- | ------------------------------------------------------------------------------------- |
+| 解压压缩包                        | 文件解压到指定可写目录，不要求维护者专用路径                                          |
+| 第一次运行 `install-windows.bat`  | 项目内 Node.js 运行时、依赖、工作区构建、空白本地 `.env` 和启动准备完成               |
+| 重复运行安装器                    | 受管理的运行时/依赖可以再次构建；本地用户设置仍在项目边界内                           |
+| 启动快捷方式 / `start-xbloom.bat` | UI 打开本地地址，API 监听文档中的回环端口                                             |
+| 模型设置                          | 用户填写个人端点/密钥，并完成发现、测试和保存                                         |
+| 生成                              | FAST/PRO/MAX 按当前模型生成预期的结构化配方                                           |
+| xBloom 云端                       | 用户从 Cloud 页面登录并上传/管理配方                                                  |
+| 可选本地助手                      | 本地配对需要明确确认；停止助手后基础冲煮流程仍可使用                                  |
+| 可选 BLE                          | Python/设备设置与 xBloom 云端上传流程分开                                             |
+| 停止                              | `stop-xbloom.bat` 停止本地服务；再次启动可以恢复本地流程                              |
+| 卸载/清理                         | 发布说明明确列出本地 data、`.env`、`.runtime`、助手状态和桌面快捷方式等用户自行管理项 |
 
-- `xbloom-ai-brew-studio-v0.1.1-windows.zip`
-- 对应的 `.sha256` 校验文件
-- GitHub Release 与自动生成的变更说明
+安装器针对 exFAT/FAT 提供物理工作区依赖路径。升级一致性验收仍优先使用本机可写的 NTFS 目录。
 
-下载 ZIP 后在一台干净 Windows 用户环境中再走一遍 `install-windows.bat`，随后检查三处首次配置入口：模型 URL/Key、小红书扫码、xBloom 自有账号登录。
+### Hosted 多用户矩阵
 
-## 5. 后续版本
+使用两个合成测试账号 `USER_A` 和 `USER_B`，分别配置不同的测试模型连接。请使用测试账号，不要使用维护者账号或真实生产凭证。
 
-每次发布前更新版本号和变更说明，再使用新的语义化标签。账号、Token、Cookie 或 Key 如果曾进入 Git 历史，应立即轮换对应凭据，并在公开前清理历史；只删除当前文件并不能清除旧提交。
+| 检查          | 预期现象                                                                      |
+| ------------- | ----------------------------------------------------------------------------- |
+| 注册/登录     | 两个账号各自获得独立会话                                                      |
+| 保存个人模型  | `USER_A` 和 `USER_B` 可以保存不同的服务商/模型                                |
+| 模型发现/测试 | 每次测试使用当前账号自己的端点和密钥                                          |
+| 配方隔离      | `USER_A` 保存的配方不出现在 `USER_B` 的列表中                                 |
+| 豆子/历史隔离 | 豆子记录和历史记录按账号保存                                                  |
+| xBloom 隔离   | 两个账号的 xBloom 会话和云端操作彼此独立                                      |
+| 生成          | 每个账号使用自己的模型设置；共享模型（guest model）只覆盖未配置个人模型的账号 |
+| 退出/会话     | 退出当前浏览器会话，不影响另一个账号                                          |
+| 中国 Relay    | EdgeOne 可以把 API、Cookie 和流式路径转发到 Worker                            |
+| 可选本地助手  | 配对限制在回环本地服务，不把 Cookie 存储暴露给 D1                             |
 
-参考：
+## 发布流程
 
-- [GitHub Releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)
-- [Repository rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets)
-- [Secret scanning push protection](https://docs.github.com/en/code-security/secret-scanning/introduction/about-push-protection)
+1. 更新版本化公开文档和 `CHANGELOG.md`。
+2. 运行 `npm run verify`、`npm run check:release` 以及 Windows/Hosted 验收矩阵。
+3. 检查 `git diff --check` 和 `git status --short`。
+4. 创建 `v0.2.0` tag，并使用仓库已有的发布 workflow 发布 GitHub Release。workflow 会从 tag 对应版本打包被 Git 跟踪的文件；打 tag 前确认所有公开文档都已被 Git 跟踪。
+5. 发布 workflow 生成 Windows 压缩包和 checksum 时，将它们附在 GitHub Release 中。
+6. 发布说明写入实际验证输出；标记为 `NOT RUN` 的项目同时列出人工跟进项。
+
+## 隐私和回滚
+
+- 发布压缩包只包含公开源码、文档、示例和构建输入；`.env`、本地 data、浏览器配置文件、xBloom/Xiaohongshu 会话、Worker 密钥和 EdgeOne 密钥都留在各自的配置边界。
+- 常规 Hosted 升级保留两把应用密钥。需要轮换时，先定义迁移和回滚方案，再更新密钥。
+- Windows 安装包回滚时，把用户本地 data 和 `.env` 与替换的压缩包分开保存；清理前先备份用户自己的本地数据。
+- 发布门禁失败时，在发布产物说明中记录失败项，处理完成后再宣布版本。

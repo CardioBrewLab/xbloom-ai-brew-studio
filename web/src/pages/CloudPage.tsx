@@ -89,7 +89,7 @@ export default function CloudPage({ cloud, onCloudChanged, onImport }: CloudPage
     setLoggingIn(true);
     setMessage("");
     try {
-      await api.cloudLogin(email.trim(), password);
+      await api.cloudLogin(email.trim(), password, cloudRegion);
       setEmail("");
       setPassword("");
       onCloudChanged();
@@ -220,6 +220,29 @@ export default function CloudPage({ cloud, onCloudChanged, onImport }: CloudPage
                 )}
 
                 <div className="mt-6 space-y-4">
+                  <Field label="账号区域" hint="与手机 xBloom App 的账号区域保持一致">
+                    <div className="grid grid-cols-2 gap-2 rounded-xl border border-[var(--line)] bg-[var(--bg-inset)] p-1">
+                      {(
+                        [
+                          ["cn", "中国区"],
+                          ["global", "全球区"],
+                        ] as const
+                      ).map(([value, label]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => setCloudRegion(value)}
+                          className={`rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+                            cloudRegion === value
+                              ? "bg-[var(--bg-card)] text-[var(--tx-1)] shadow-sm"
+                              : "text-[var(--tx-3)]"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </Field>
                   <Field label="xBloom 账号邮箱">
                     <input
                       type="email"

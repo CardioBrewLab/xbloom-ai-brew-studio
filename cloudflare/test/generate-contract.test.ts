@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hostedCandidateSelection, publicHostedFailureReason } from "../src/index.ts";
+import {
+  hostedCandidateSelection,
+  publicApiError,
+  publicHostedFailureReason,
+} from "../src/index.ts";
 import { normalizeRecipe } from "../src/recipe.ts";
 
 const recipe = (grinderSize: number) =>
@@ -39,4 +43,23 @@ test("hosted failures distinguish credentials, model paths, throttling and trans
   assert.match(publicHostedFailureReason(new Error("LLM HTTP 429")), /请求较多/);
   assert.match(publicHostedFailureReason(new TypeError("fetch failed")), /网络连接波动/);
   assert.match(publicHostedFailureReason(new Error("Unexpected token in JSON")), /响应格式/);
+});
+
+test("public API errors keep user guidance and hide internal runtime details", () => {
+  assert.deepEqual(publicApiError(new SyntaxError("Unexpected token")), {
+    status: 400,
+    message: "请求体不是有效的 JSON",
+  });
+  assert.equal(publicApiError(new Error("请填写账号名")).status, 400);
+  assert.equal(publicApiError(new Error("登录尝试较多，请稍后继续")).status, 429);
+  assert.equal(publicApiError(new Error("模型接口 HTTP 401：bad key")).status, 502);
+  assert.deepEqual(publicApiError(new Error("D1_ERROR: SELECT password_hash failed")), {
+    status: 500,
+    message: "服务本次未完成请求，请稍后重试",
+  });
+  assert.deepEqual(publicApiError(new Error("APP_DATA_ENCRYPTION_KEY missing")), {
+    status: 503,
+    message: "站点配置尚未完成，请联系站点维护者",
+  });
+  assert.equal(publicApiError(new Error("APP_PASSWORD_PEPPER missing")).status, 503);
 });

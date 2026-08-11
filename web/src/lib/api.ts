@@ -5,9 +5,15 @@
  * 所有类型严格按统一 API 契约声明。
  */
 import { RecipeSchema, type Recipe } from "./recipe-schema.js";
+import {
+  createClientPasswordParams,
+  deriveClientPasswordProof,
+  type ClientPasswordParams,
+} from "@xbloom/shared/password-auth";
 import type { LlmSettingsUpdateInput } from "./llm-settings.js";
 import type { GenerationMode } from "./generation-mode.js";
 import type { XhsQrFailureKind } from "./xhs-qr.js";
+import { companionConfig, companionFetch, hostedPage } from "./companion.js";
 
 // ---------------------------------------------------------------------------
 // 契约类型
@@ -19,17 +25,44 @@ export interface ServerConfig {
   limits: Record<string, unknown>;
   /** 云端区域：cn = 中国区，global = 全球区（后端 /api/config 返回） */
   cloudRegion?: "cn" | "global";
+  deployment?: "cloudflare" | "local" | string;
+  authenticated?: boolean;
+  modelConfigured?: boolean;
+}
+
+export type ModelProvider = "openai-compatible" | "anthropic" | "gemini";
+
+export interface ModelProviderPreset {
+  id: "openai" | "anthropic" | "kimi" | "deepseek" | "qwen" | "gemini" | "custom";
+  label: string;
+  provider: ModelProvider;
+  baseUrl: string;
+  domestic: boolean;
+  hint: string;
+}
+
+export interface AuthUser {
+  id: string;
+  loginName: string;
+  displayName: string;
+}
+
+export interface AuthSession {
+  ok: boolean;
+  authenticated: boolean;
+  user: AuthUser | null;
 }
 
 /** 本机模型设置的公开形态；服务端只返回密钥配置状态，不返回密钥正文。 */
 export interface LlmSettingsPublic {
+  provider?: ModelProvider;
   baseUrl: string;
   model: string;
   fallbackModel: string;
   thirdModel: string;
   apiKeyConfigured: boolean;
   fallbackApiKeyConfigured: boolean;
-  source: "environment" | "local";
+  source: "environment" | "local" | "user" | "unconfigured";
   localOverridePresent: boolean;
   localOverrideValid: boolean;
   updatedAt?: string;
@@ -80,6 +113,7 @@ export interface CloudStatus {
   autoLogin?: boolean;
   /** 当前登录账号邮箱（已登录时返回） */
   email?: string;
+  region?: "cn" | "global";
 }
 
 export interface BleStatus {
@@ -209,6 +243,19 @@ export interface GenerateRequest {
   feedback?: BrewFeedback;
   /** 基础配方在本地库的 entry id：后端据此注入该 lineage 的历史反馈 */
   baseRecipeId?: string;
+  /**
+   * 常在线网页可选地从用户电脑上的本地助手取得调研素材，再随本次生成提交。
+   * Cookie 和配对令牌不进入该载荷；服务端只接收清洗后的摘要与公开来源。
+   */
+  researchPacket?: {
+    ok: boolean;
+    sources: ResearchSource[];
+    summaryText: string;
+    message: string;
+    filtered: number;
+    distilled: boolean;
+    xhsLoginExpired?: boolean;
+  };
 }
 
 /** 联网调研来源（research 事件携带） */
@@ -497,9 +544,71 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body;
 }
 
+async function xhsRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  if (!hostedPage()) return request<T>(path, init);
+  if (!companionConfig()) {
+    if (path === "/api/xhs/status") {
+      return {
+        ok: true,
+        online: false,
+        loggedIn: false,
+        failureKind: "service_offline",
+        message: "先连接本地助手，再使用小红书辅助调研",
+      } as T;
+    }
+    throw new ApiRequestError("请先连接本地助手", "service_offline");
+  }
+  let response: Response;
+  try {
+    response = await companionFetch(path, init);
+  } catch (error) {
+    throw new ApiRequestError((error as Error).message, "service_offline");
+  }
+  const body = await parseJson<T>(response);
+  if (
+    !response.ok ||
+    (body && typeof body === "object" && (body as { ok?: unknown }).ok === false)
+  ) {
+    const value = body as { message?: string; failureKind?: XhsQrFailureKind };
+    throw new ApiRequestError(
+      value.message ?? `请求失败（HTTP ${response.status}）`,
+      value.failureKind,
+    );
+  }
+  return body;
+}
+
 export const api = {
   getConfig: () => request<ServerConfig>("/api/config"),
   getStatus: () => request<{ ok: boolean; capabilities: Capabilities }>("/api/status"),
+
+  // ---- Hosted 多用户账号；本地版可按 404 视为免账号模式 ----
+  authSession: () => request<AuthSession>("/api/auth/session"),
+  register: async (loginName: string, password: string) => {
+    const credential = await deriveClientPasswordProof(password, createClientPasswordParams());
+    return request<AuthSession>("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify({
+        loginName,
+        passwordProof: credential.proof,
+        passwordSalt: credential.salt,
+        passwordIterations: credential.iterations,
+        passwordScheme: credential.scheme,
+      }),
+    });
+  },
+  login: async (loginName: string, password: string) => {
+    const params = await request<ClientPasswordParams & { ok: boolean }>(
+      "/api/auth/password-params",
+      { method: "POST", body: JSON.stringify({ loginName }) },
+    );
+    const credential = await deriveClientPasswordProof(password, params);
+    return request<AuthSession>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ loginName, passwordProof: credential.proof }),
+    });
+  },
+  logout: () => request<AuthSession>("/api/auth/logout", { method: "POST" }),
 
   // ---- 本机模型接口设置（不改变服务地址或第三方登录态） ----
   getLlmSettings: () =>
@@ -507,10 +616,14 @@ export const api = {
       (result) => result.settings,
     ),
   updateLlmSettings: (input: LlmSettingsUpdateInput) =>
-    request<{ ok: boolean; settings: LlmSettingsPublic }>("/api/settings/llm", {
+    request<{
+      ok: boolean;
+      settings: LlmSettingsPublic;
+      test?: { model: string; latencyMs: number };
+    }>("/api/settings/llm", {
       method: "PUT",
       body: JSON.stringify(input),
-    }).then((result) => result.settings),
+    }),
   resetLlmSettings: () =>
     request<{ ok: boolean; settings: LlmSettingsPublic }>("/api/settings/llm", {
       method: "DELETE",
@@ -519,6 +632,22 @@ export const api = {
     request<{ ok: boolean; model: string; latencyMs: number }>("/api/settings/llm/test", {
       method: "POST",
     }),
+  testLlmDraft: (input: LlmSettingsUpdateInput) =>
+    request<{ ok: boolean; provider?: ModelProvider; model: string; latencyMs: number }>(
+      "/api/settings/llm/test",
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+  detectLlmModels: (input: Pick<LlmSettingsUpdateInput, "provider" | "baseUrl" | "apiKey">) =>
+    request<{
+      ok: boolean;
+      provider: ModelProvider;
+      models: string[];
+      latencyMs: number;
+    }>("/api/settings/llm/detect", { method: "POST", body: JSON.stringify(input) }),
+  listLlmProviders: () =>
+    request<{ ok: boolean; providers: ModelProviderPreset[] }>("/api/settings/llm/providers").then(
+      (result) => result.providers,
+    ),
 
   // ---- 本地配方库 ----
   listRecipes: () => request<{ ok: boolean; recipes: SavedRecipe[] }>("/api/recipes"),
@@ -635,10 +764,10 @@ export const api = {
 
   // ---- 云端 ----
   cloudStatus: () => request<CloudStatus>("/api/cloud/status"),
-  cloudLogin: (email: string, password: string) =>
+  cloudLogin: (email: string, password: string, region?: "cn" | "global") =>
     request<{ ok: boolean; memberId: string; email: string }>("/api/cloud/login", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, ...(region ? { region } : {}) }),
     }),
   cloudLogout: () => request<{ ok: boolean }>("/api/cloud/logout", { method: "POST" }),
   cloudPublish: (recipe: Recipe, name?: string) =>
@@ -684,17 +813,17 @@ export const api = {
 
   // ---- 小红书账号（任务 #83） ----
   /** 登录态探活：online:false = 本地 MCP 服务未启动（区别于掉登录） */
-  xhsStatus: () => request<XhsStatus>("/api/xhs/status"),
+  xhsStatus: () => xhsRequest<XhsStatus>("/api/xhs/status"),
   /** 获取登录二维码（base64 data URL + 失效时刻）；alreadyLoggedIn 时需先登出切号 */
-  xhsQrcode: () => request<XhsQrcode>("/api/xhs/login/qrcode", { method: "POST" }),
+  xhsQrcode: () => xhsRequest<XhsQrcode>("/api/xhs/login/qrcode", { method: "POST" }),
   /** 扫码确认轮询（前端 2-3s 间隔，二维码过期自动停） */
-  xhsPoll: () => request<XhsStatus>("/api/xhs/login/poll"),
+  xhsPoll: () => xhsRequest<XhsStatus>("/api/xhs/login/poll"),
   /** 登出重置登录态（切换账号前置） */
   xhsLogout: () =>
-    request<{ ok: boolean; message?: string }>("/api/xhs/logout", { method: "POST" }),
+    xhsRequest<{ ok: boolean; message?: string }>("/api/xhs/logout", { method: "POST" }),
   /** 扫码风控兜底（任务 #97）：粘贴浏览器 Cookie 导入登录，后端写入后立即验证 */
   xhsCookieImport: (cookie: string) =>
-    request<XhsStatus & { message?: string }>("/api/xhs/login/cookie-import", {
+    xhsRequest<XhsStatus & { message?: string }>("/api/xhs/login/cookie-import", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ cookie }),

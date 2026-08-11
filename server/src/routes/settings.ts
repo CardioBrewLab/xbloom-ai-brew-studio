@@ -2,6 +2,15 @@
 import { Router } from "express";
 import { fetch } from "undici";
 import { ZodError } from "zod";
+import {
+  MODEL_PROVIDER_PRESETS,
+  detectModelProvider,
+  discoverModels,
+  normalizeModelBaseUrl,
+  testModelConnection,
+  type FetchLike,
+  type ModelConnection,
+} from "@xbloom/shared/model-provider";
 import { config } from "../config.js";
 import {
   currentLlmSettings,
@@ -31,7 +40,7 @@ router.use((req, res, next) => {
   const changesSettings =
     req.method === "PUT" ||
     req.method === "DELETE" ||
-    (req.method === "POST" && req.path === "/llm/test");
+    (req.method === "POST" && ["/llm/test", "/llm/detect"].includes(req.path));
   if (changesSettings && !isTrustedSettingsOrigin(req.get("origin"))) {
     res.status(403).json({ ok: false, message: "模型设置只接受本机工作台发起的修改" });
     return;
@@ -39,10 +48,54 @@ router.use((req, res, next) => {
   next();
 });
 
-router.post("/llm/test", async (_req, res) => {
+function requestConnection(body: unknown): ModelConnection & { model: string } {
+  const input = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const baseUrl =
+    typeof input.baseUrl === "string" && input.baseUrl.trim()
+      ? normalizeModelBaseUrl(input.baseUrl, true)
+      : config.llm.baseUrl;
+  const sameEndpoint = new URL(baseUrl).origin === new URL(config.llm.baseUrl).origin;
+  const apiKey =
+    typeof input.apiKey === "string" && input.apiKey.trim()
+      ? input.apiKey.trim()
+      : sameEndpoint
+        ? config.llm.apiKey
+        : "";
+  const model =
+    typeof input.model === "string" && input.model.trim() ? input.model.trim() : config.llm.model;
+  const provider =
+    input.provider === "anthropic" ||
+    input.provider === "gemini" ||
+    input.provider === "openai-compatible"
+      ? input.provider
+      : sameEndpoint
+        ? config.llm.provider
+        : detectModelProvider(baseUrl);
+  return { provider, baseUrl, apiKey, model };
+}
+
+router.get("/llm/providers", (_req, res) => {
+  res.json({ ok: true, providers: MODEL_PROVIDER_PRESETS });
+});
+
+router.post("/llm/detect", async (req, res) => {
+  try {
+    const connection = requestConnection(req.body);
+    const result = await discoverModels(connection, {
+      fetcher: fetch as unknown as FetchLike,
+      allowLoopback: true,
+    });
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    res.status(400).json({ ok: false, message: (error as Error).message || "模型识别失败" });
+  }
+});
+
+router.post("/llm/test", async (req, res) => {
   const startedAt = Date.now();
   try {
-    const endpoint = new URL(config.llm.baseUrl);
+    const connection = requestConnection(req.body);
+    const endpoint = new URL(connection.baseUrl);
     const secureEndpoint =
       endpoint.protocol === "https:" ||
       (endpoint.protocol === "http:" && isLoopbackHostname(endpoint.hostname));
@@ -50,34 +103,31 @@ router.post("/llm/test", async (_req, res) => {
       res.status(400).json({ ok: false, message: "模型接口需使用 HTTPS；本机回环地址可使用 HTTP" });
       return;
     }
-    if (!config.llm.apiKey.trim() || !config.llm.model.trim()) {
+    if (!connection.apiKey.trim() || !connection.model.trim()) {
       res.status(400).json({ ok: false, message: "请先填写主模型与 API Key" });
       return;
     }
-    const url = new URL(`${endpoint.pathname.replace(/\/$/, "")}/chat/completions`, endpoint);
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${config.llm.apiKey}` },
-      body: JSON.stringify({
-        model: config.llm.model,
-        messages: [{ role: "user", content: "Reply with OK." }],
-        max_tokens: 32,
-        stream: false,
-      }),
-      signal: AbortSignal.timeout(20_000),
+    const tested = await testModelConnection(connection, {
+      fetcher: fetch as unknown as FetchLike,
+      allowLoopback: true,
     });
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      res.status(400).json({ ok: false, message: `模型接口返回 HTTP ${response.status}` });
-      return;
-    }
-    await response.body?.cancel().catch(() => undefined);
-    res.json({ ok: true, model: config.llm.model, latencyMs: Date.now() - startedAt });
+    res.json({
+      ok: true,
+      provider: tested.provider,
+      model: tested.model,
+      latencyMs: Date.now() - startedAt,
+    });
   } catch (error) {
     const timedOut = (error as Error)?.name === "TimeoutError";
-    res
-      .status(timedOut ? 504 : 400)
-      .json({ ok: false, message: timedOut ? "模型连接测试超过 20 秒" : "模型接口连接失败" });
+    const upstreamStatus = (error as Error)?.message.match(/HTTP\s+(\d{3})/i)?.[1];
+    res.status(timedOut ? 504 : 400).json({
+      ok: false,
+      message: timedOut
+        ? "模型连接测试超过 20 秒"
+        : upstreamStatus
+          ? `模型接口返回 HTTP ${upstreamStatus}`
+          : "模型接口连接失败",
+    });
   }
 });
 

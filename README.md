@@ -1,184 +1,126 @@
-<div align="center">
-
 # xBloom AI Brew Studio
 
-**在电脑上把豆子研究透，再把配方一键上传到手机 xBloom App。**
+> Version 0.2.0 · Windows 本地版 + 多用户 Hosted 云端版 · BYOK
 
-从豆仓、联网调研、三候选择优，到曲线检查、参数微调、杯测迭代与云端同步，一套完整的桌面冲煮工作流。
+xBloom AI Brew Studio 会把咖啡目标、豆子、风味偏好和调研信息整理成可执行的 xBloom 配方。项目提供两种使用方式：
 
-![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-2563eb?style=flat-square)
-![Node](https://img.shields.io/badge/Node.js-22.12%2B-3c873a?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-706%20passing-b47a33?style=flat-square)
-![License](https://img.shields.io/badge/license-MIT-111111?style=flat-square)
+- **Hosted 云端版**：浏览器直接使用，支持多用户、账号隔离、个人模型配置和每个用户自己的 xBloom 云端同步。
+- **Windows 本地版**：适合保存本地文件、使用本地调研工具、运行可选的小红书助手和可选的 Bluetooth 设备实验室。
 
-</div>
+新用户优先使用 Hosted 云端版即可完成主要流程；需要本地数据、本地工具或 BLE 设备时，再使用 Windows 本地版。
 
-![xBloom AI Brew Studio 桌面工作台](docs/images/app-overview.png)
+## 先选择使用方式
 
-## 为什么做它
+| 能力           | Hosted 云端版                                                                                        | Windows 本地版                                       |
+| -------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| 账号           | 注册并登录；数据按账号隔离                                                                           | 本机浏览器配置和本地文件                             |
+| 模型接入       | 个人 BYOK，支持 OpenAI/GPT、Claude、Kimi、DeepSeek、Qwen、Gemini 和自定义 OpenAI-compatible 服务     | 通过本地 `.env` 或设置页面配置，同样支持这些模型协议 |
+| 模型发现/测试  | 设置页面支持                                                                                         | 端点支持时可用                                       |
+| xBloom         | 登录 xBloom 云端并按账号上传、管理配方                                                               | 通过本地工作台登录并使用本地流程                     |
+| 小红书         | 可选连接本机助手                                                                                     | 可选本地助手                                         |
+| BLE 设备实验室 | Worker 不包含此能力                                                                                  | 可选 Windows/Python 设置                             |
+| 数据链路       | 中国入口使用 EdgeOne 前端/API Relay、Cloudflare Worker 和 D1；见[中国部署说明](docs/DEPLOY_CHINA.md) | `127.0.0.1` 本地服务和项目数据                       |
 
-xBloom App 很适合执行配方，但在真正上传之前，常常还要查豆商资料、翻社区经验、换算滤杯差异、比较几套参数，再记录每次杯测结果。
+## Hosted 云端版：第一次使用
 
-这个项目把这些准备工作放到电脑上完成：
+1. 打开部署者提供的 Hosted URL。
+2. 选择 **注册**，创建账号并登录。请使用至少 10 个字符的独立密码；高强度密码计算在浏览器本机完成，服务端只接收一次性登录凭据。
+3. 打开 **Settings → Model**，选择模型预设或 **Custom OpenAI-compatible**。
+4. 填入自己持有的模型 API key；需要时填写端点 URL。点击 **Discover models**，选择模型，点击 **Test**，最后点击 **Save**。
+5. 填写冲煮目标并生成配方。当前账号的模型连接会用于这次请求。
+6. 打开 **Cloud → xBloom**，选择服务显示的区域，使用自己的 xBloom 账号登录，然后上传或管理配方。
+7. 如果调研需要小红书，在同一台 Windows 电脑上安装并启动本地助手，然后点击 **Connect local assistant**。助手是可选项；没有助手时，基础冲煮流程仍可使用。
 
-1. 选择豆子，写下口味和场景；
-2. 从小红书、聚合搜索与网页资料中整理可用信号；
-3. 并行生成多套方案，按七个维度评分并自动检查边界；
-4. 查看注水曲线、逐段参数和冲煮理由，按需要微调；
-5. **上传到 xBloom 云端，随后在手机 xBloom App 中使用。**
+### 支持的个人模型连接
 
-它的重点不是让电脑代替手机 App，而是把上传前最费时间的工作做完整。
+账号设置页面提供以下预设：
 
-## 现在已经有什么
+- OpenAI / GPT
+- Anthropic / Claude
+- Kimi
+- DeepSeek
+- Qwen
+- Google Gemini
+- Custom OpenAI-compatible 服务
 
-| 模块          | 当前能力                                                                                   |
-| ------------- | ------------------------------------------------------------------------------------------ |
-| AI 配方工作台 | 自然语言输入、结构化豆档案、OpenAI 兼容模型、SSE 流式过程、参考链接、烘焙商方案输入        |
-| 联网调研      | 小红书优先、SearXNG、Firecrawl、网页搜索兜底；来源去重、他豆拦截、他滤杯识别、状态如实披露 |
-| 多候选择优    | 三种独立冲煮策略并行生成；参数指纹去重、七维评分、一票否决、平局裁决、低分换源重调研       |
-| 自动审查      | 配方 Schema、粉水比可达性、分段总水、温度/流速/研磨/停顿边界、旁路水规则、最多一轮自动修正 |
-| 曲线与步骤    | 注水量、水温、流速、旁路曲线；参数统计、逐段步骤、方案解读、桌面冲煮引导与计时             |
-| 上传手机 App  | xBloom 登录、发布前字段预览与自动对齐、新建/更新/删除云端配方、云端列表与分享链接          |
-| 豆仓          | 豆档案、AI 文本归档、库存、烘焙日与适饮窗口、可冲次数、Top 3 推荐、冲煮后扣减              |
-| 杯测迭代      | 星级与味型反馈、基于旧配方再调参、版本链、差异卡、烘焙商原版与 AI 改进版对照               |
-| 冲煮历史      | 搜索、收藏、有反馈/迭代版筛选、载入继续编辑、豆档案手动关联                                |
-| 小红书        | 页面内扫码登录、状态轮询、退出、Cookie 导入兜底；登录后参与本豆调研                        |
-| 桌面体验      | Warm Paper / Espresso 双主题、PWA 缓存壳、守护进程、自恢复、本地日志                       |
-| BLE 实验      | 设备扫描、配方编码、下发、停止与边界校验；默认折叠，日常主流程仍是上传手机 App             |
+Kimi、DeepSeek 和 Qwen 使用 OpenAI-compatible 协议。Hosted Worker 调用自定义模型时，需要使用公开 HTTPS URL。模型测试或生成时，API key 会发送给所选模型服务；设置 API 不会再次返回已保存的 key。
 
-完整细节见 [当前功能全景](docs/FEATURES.md)。
+### Hosted 凭证和隐私边界
 
-## 界面实拍
+- 模型 API key 归当前账号所有。每个账号都有独立的模型设置和 xBloom 云端会话。
+- Hosted 服务会使用部署的应用数据密钥，加密保存模型 API Key 和 xBloom 登录凭据；模型 URL、模型名、配方与豆档案等业务字段保存在 D1。平台运营者仍掌握 Worker、D1、部署配置和运行日志，因此部署者属于独立的信任边界。
+- 所选模型服务商会收到请求中的提示词和上下文。冲煮笔记中请只放本次任务需要的信息。
+- xBloom 凭据只用于当前账号的 xBloom 云端操作。小红书凭据留在可选的本地助手流程中。
+- 浏览器 Cookie 用于维持当前会话。在共享电脑上使用后请退出登录；不同用户使用独立浏览器配置文件。
+- 尚未配置 BYOK 的访客可以使用部署者可选的共享模型（guest model）；它与每个账号的个人模型连接是两套配置。
 
-<table>
-  <tr>
-    <td width="50%"><img src="docs/images/espresso-theme.png" alt="Espresso 深色工作台"></td>
-    <td width="50%"><img src="docs/images/bean-library.png" alt="豆仓与 AI 推荐"></td>
-  </tr>
-  <tr>
-    <td align="center">Espresso 深色工作台</td>
-    <td align="center">豆仓、适饮窗口与 AI 推荐</td>
-  </tr>
-</table>
+## Windows 本地版：新电脑安装
 
-## Windows 一键安装
+发布包会根据自己的解压目录计算项目路径，不依赖开发者的源码目录或固定盘符。
 
-### 普通使用者
+### 安装前准备
 
-1. 从 GitHub Releases 下载 `xbloom-ai-brew-studio-vX.Y.Z-windows.zip`；
-2. 解压到一个固定目录；
-3. 双击 **`install-windows.bat`**；
-4. 安装完成后，从桌面的 **xBloom AI Brew Studio** 快捷方式启动。
+- Windows 10 或更高版本，并可使用 PowerShell。
+- 首次安装需要网络，用来下载项目内的 Node.js 运行时和依赖。
+- 一个当前用户可写的本地目录。包含空格或中文的路径可按安装器的路径计算方式使用；可移动介质建议先复制到本机可写的 NTFS 目录，以减少文件权限和链接差异。
+- 只有使用可选 BLE 设备实验室时才需要 Python 3.10+。xBloom App 上传流程不需要 BLE。
 
-安装脚本会在项目目录内准备便携版 Node.js、安装依赖、完成构建，并安装经 SHA-256 校验的 Windows 修订版小红书 MCP。修订版可由仓库内脚本从上游 `v2.4.3` 源码复现构建；整个运行环境位于项目自己的 `.runtime` 目录。
+### 安装和启动
 
-安装器已覆盖 NTFS、ReFS 与 exFAT：标准磁盘使用 npm workspace 链接；exFAT 等不支持目录链接的磁盘自动改用物理依赖布局。发布门禁还会在带空格的隔离目录中重新下载便携 Node、构建并启动一份空账号副本。
+1. 下载 Windows 发布压缩包，解压到可写目录。
+2. 在解压目录中双击 `install-windows.bat`，或运行：
 
-> 首次启动小红书服务时会下载浏览器运行组件，通常需要几分钟。
+   ```powershell
+   .\install-windows.bat
+   ```
 
-### 已有 Node.js 的开发者
+   安装器会准备项目内的 Node.js 运行时，安装锁定依赖，构建各工作区，在需要时创建空白本地 `.env`，安装可选的小红书助手；如果电脑已经有 Python，也会尝试准备可选 BLE 环境。
 
-```powershell
-npm ci
-npm run build
-.\start-xbloom.bat
-```
+3. 安装完成后会启动应用。如果浏览器没有自动打开，可以使用桌面快捷方式或运行：
 
-要求 Node.js `22.12.0+`；一键安装脚本当前使用 Node.js `24.18.0 LTS`。
+   ```powershell
+   .\start-xbloom.bat
+   ```
 
-实验性 Windows BLE 设备实验室需要 Python 3.10+。安装脚本检测到 Python 时会自动准备；之后也可单独运行 `./install-ble.ps1`。日常路径仍是上传到手机 xBloom App。
+4. 本地浏览器界面默认地址是 `http://localhost:5180`，API 默认监听 `127.0.0.1:8787`。小红书助手第一次启动时可能还会下载浏览器运行时。停止本地服务请运行 `stop-xbloom.bat`。
 
-## Cloudflare 常在线版
+安装器针对 exFAT/FAT 提供物理依赖布局，不依赖 Windows 工作区链接；升级时仍建议把发布目录放在本机可写的 NTFS 卷上。重复运行安装器会刷新受管理的运行时、依赖并重新构建应用；清理文件时请保留用户自己的数据和 `.env`。
 
-仓库同时提供 [Cloudflare 部署目录](cloudflare/README.md)：同一套 React 界面由 Worker Static Assets 托管，核心配方生成、豆仓和历史使用 Worker + D1；电脑关机后网页继续在线。手机 xBloom App 上传、小红书扫码调研和 BLE 设备实验继续使用每位用户自己的 Windows 本地完整版，不共享作者或部署者的第三方登录态。
+### 配置 Windows 本地版
 
-当前在线实例：[xbloom-ai-brew-studio.lacy-yarn.workers.dev](https://xbloom-ai-brew-studio.lacy-yarn.workers.dev/)
+1. 打开本地界面的设置页面。
+2. 填写模型端点、模型名称和 API key；可以使用本地 `.env`，也可以使用支持的设置页面。
+3. 在 Cloud 页面选择对应的 xBloom 区域，登录并上传配方。
+4. 需要小红书调研时，启动本地助手并从页面完成配对。助手的登录状态保存在本机运行时目录中。
+5. 只有在使用兼容的 Windows/Python 设备流程时才运行 BLE 设置；它和 xBloom App 云端上传是两条独立流程。
 
-## 第一次打开：只填你自己的账号与接口
+本地服务端默认绑定回环地址。`data/`、`.env`、`.runtime/` 和助手运行时目录都属于当前 Windows 用户的本地数据，请从其他人的电脑或发布压缩包中重新配置，不要直接复制会话状态。
 
-仓库与发布包均为空配置，不含作者的 URL、API Key、xBloom 账号或小红书会话。
+## 开发和验证
 
-### 1. 配置模型接口
-
-打开右上角 **设置**，填写：
-
-- OpenAI 兼容 API 地址，例如 `https://your-gateway.example/v1`
-- 主模型 ID
-- API Key
-- 可选的备用模型与备用 Key
-
-点击 **保存并测试**。程序会通过同一条 `/chat/completions` 链路发起一个很小的请求，并显示实际使用的模型与耗时。Windows 下保存的 Key 使用当前用户的 DPAPI 加密，读取接口只返回“已配置”状态。
-
-### 2. 登录小红书
-
-打开页面中的小红书账号入口，点击扫码登录，再用你自己的小红书 App 扫码。会话保存在本机 `tools/xhs-mcp/runtime/cookies.json`；整个运行目录均被 Git 忽略，并限制为当前 Windows 用户、SYSTEM 与管理员访问。
-
-### 3. 登录 xBloom 并上传
-
-生成或载入配方后点击 **上传到手机 xBloom App**，在发布面板中输入自己的 xBloom 邮箱与密码。登录成功后，邮箱与密码输入框会立即清空；磁盘只缓存当前 Windows 用户可解开的云端会话 Token。随后先看发布预览，再确认上传，最后回到同一账号的手机 xBloom App 使用该配方。
-
-更细的接口格式、区域与可选服务配置见 [配置说明](docs/CONFIGURATION.md)。
-
-## 数据与隐私
-
-| 内容                                   | 保存位置                               | Git 状态 |
-| -------------------------------------- | -------------------------------------- | -------- |
-| 模型 URL、模型名、加密后的 Key         | `data/llm-settings.json`               | 已忽略   |
-| 豆仓与本地配方                         | `data/beans.json`、`data/recipes.json` | 已忽略   |
-| xBloom 会话（Token 使用 DPAPI 保护）   | `data/session.json`                    | 已忽略   |
-| 小红书会话                             | `tools/xhs-mcp/runtime/cookies.json`   | 已忽略   |
-| 日志、浏览器运行目录、下载的可执行文件 | `data/`、`.runtime/`、`tools/xhs-mcp/` | 已忽略   |
-
-后端固定监听 `127.0.0.1`。提交前可运行：
-
-```powershell
-npm run check:release
-npm run test:install
-```
-
-它会检查 Git 跟踪文件中是否混入本地配置、会话、压缩包、日志、绝对用户路径或常见密钥格式。
-
-## 技术结构
-
-```text
-React 19 + Vite 7 + Tailwind 4
-                 │ /api + SSE
-                 ▼
-Express 5 + Zod + JSON 原子存储
-       ├── OpenAI-compatible LLM
-       ├── Xiaohongshu MCP
-       ├── SearXNG / Firecrawl / Web research
-       ├── xBloom cloud API → 手机 xBloom App
-       └── BLE bridge（实验）
-```
-
-配方 Schema 与共用安全规则由 `shared/` 工作区统一提供给前后端，避免两份边界规则逐渐分叉。更多内容见 [架构说明](docs/ARCHITECTURE.md)。
-
-## 开发与验证
+从源码运行时使用 Node.js `>=22.12.0` 和仓库锁定的依赖：
 
 ```powershell
 npm ci
-npm run test:all
-npm run build
-npm run format:check
-npm run check:release
+npm run verify
 ```
 
-当前基线：后端 551 项、前端 145 项、Cloudflare 10 项，共 706 项测试。GitHub Actions 在 Windows 上执行格式、发布安全检查、全量测试、构建、Worker 校验与空账号跨目录安装演练；推送 `v*` 标签时会生成可下载的 Release ZIP。
+本文不固定测试数量；当前检出版本的测试数量以 `npm run verify` 实际输出为准。
 
-仓库维护者首次公开与打标签的完整步骤见 [发布到 GitHub](docs/PUBLISHING.md)。
+## 文档索引
 
-## 常见问题
+- [配置说明](docs/CONFIGURATION.md) — Hosted 和本地模型、xBloom、小红书、调研与 BLE 设置。
+- [功能说明](docs/FEATURES.md) — 能力矩阵和流程边界。
+- [架构说明](docs/ARCHITECTURE.md) — 本地/Hosted 请求链路与凭证边界。
+- [发布说明](docs/PUBLISHING.md) — 发布、全新电脑和多用户验收步骤。
+- [中国部署说明](docs/DEPLOY_CHINA.md) — EdgeOne 前端/API Relay 加 Cloudflare Worker/D1。
+- [Cloudflare 部署说明](cloudflare/README.md) — Worker/D1 部署和可选共享模型（guest model）。
+- [变更记录](CHANGELOG.md) — 版本历史。
 
-- 小红书二维码一直加载：看 [小红书服务与首次浏览器下载](docs/TROUBLESHOOTING.md#小红书二维码一直加载)
-- 模型测试返回 HTTP 401/404：看 [API 地址与模型名](docs/TROUBLESHOOTING.md#模型连接测试失败)
-- 上传后手机 App 里没看到：看 [xBloom 区域与刷新](docs/TROUBLESHOOTING.md#上传后手机-app-里没看到配方)
-- 端口被占用或页面没打开：看 [启动与端口](docs/TROUBLESHOOTING.md#页面没有自动打开)
+## 隐私和使用范围
 
-## 贡献与许可证
+这是冲煮工作台，不是统一的凭证管理器。模型、xBloom 和小红书账号都应属于当前用户；密钥、Cookie、恢复码和其他私密信息放在本地配置或服务的密钥存储中，避免出现在 issue、截图、commit 和发布压缩包中。使用个人数据前，请分别评估部署运营者、模型服务商、EdgeOne Relay 和本地助手这几个信任边界。
 
-欢迎提交 Issue 和 Pull Request。改动前请先阅读 [贡献指南](CONTRIBUTING.md)，其中把“保留现有功能与接口契约”列为合并门槛。
+## License
 
-项目采用 [MIT License](LICENSE)。第三方组件与协议参考见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-
-> 本项目是独立的社区工具，与 xBloom、小红书不存在官方隶属或背书关系。相关名称与商标归各自权利人所有。
+见 [LICENSE](LICENSE)。

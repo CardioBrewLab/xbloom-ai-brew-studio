@@ -5,6 +5,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
+import { detectModelProvider, type ModelProvider } from "@xbloom/shared/model-provider";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const envPath = path.resolve(here, "../../.env");
@@ -28,6 +29,11 @@ function envText(value: string | undefined, fallback: string): string {
   return trimmed ? trimmed : fallback;
 }
 
+function modelProvider(value: string | undefined, baseUrl: string): ModelProvider {
+  if (value === "anthropic" || value === "gemini" || value === "openai-compatible") return value;
+  return detectModelProvider(baseUrl);
+}
+
 /**
  * 多候选生成并发数（任务 #106）：env GENERATE_CANDIDATES，缺省/空/非法值 = 3，
  * 合法值钳位到 [1,5] 整数。N=1 = 回滚开关，生成链路与现状逐字节一致。
@@ -48,6 +54,8 @@ export interface AppConfig {
   port: number;
   /** LLM 网关配置（OpenAI 兼容协议，支持双 key 三级兜底） */
   llm: {
+    /** 接口协议；自建网关可显式指定，官方域名会自动识别。 */
+    provider: ModelProvider;
     baseUrl: string;
     /** 主渠道 key（默认用于主模型与第二兜底模型） */
     apiKey: string;
@@ -94,6 +102,10 @@ export const config: AppConfig = {
   port: num(process.env.PORT, 8787),
   llm: {
     baseUrl: envText(process.env.LLM_BASE_URL, "https://api.openai.com/v1"),
+    provider: modelProvider(
+      process.env.LLM_PROVIDER,
+      envText(process.env.LLM_BASE_URL, "https://api.openai.com/v1"),
+    ),
     apiKey: process.env.LLM_API_KEY ?? "",
     fallbackApiKey: process.env.LLM_FALLBACK_API_KEY ?? "",
     model: envText(process.env.LLM_MODEL, "gpt-5.6-sol"),

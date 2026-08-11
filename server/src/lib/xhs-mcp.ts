@@ -408,6 +408,33 @@ export function isXhsAllowedLocalImagePath(raw: string): boolean {
   return allowedPrefixes.some((prefix) => resolved.startsWith(prefix));
 }
 
+const XHS_QRCODE_MAX_BYTES = 5 * 1024 * 1024;
+
+function imageMime(bytes: Buffer): "image/png" | "image/jpeg" | "image/gif" | "image/webp" | null {
+  if (
+    bytes.length >= 8 &&
+    bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  )
+    return "image/png";
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
+    return "image/jpeg";
+  if (bytes.length >= 6 && /^(GIF87a|GIF89a)$/.test(bytes.subarray(0, 6).toString("ascii")))
+    return "image/gif";
+  if (
+    bytes.length >= 12 &&
+    bytes.subarray(0, 4).toString("ascii") === "RIFF" &&
+    bytes.subarray(8, 12).toString("ascii") === "WEBP"
+  )
+    return "image/webp";
+  return null;
+}
+
+function inlineVerifiedImage(bytes: Buffer): string | null {
+  if (bytes.length === 0 || bytes.length > XHS_QRCODE_MAX_BYTES) return null;
+  const mime = imageMime(bytes);
+  return mime ? `data:${mime};base64,${bytes.toString("base64")}` : null;
+}
+
 /**
  * 解析 get_login_qrcode 的 content 数组（纯函数可测）。实测形态：
  * [{type:"text",text:"请用小红书 App 在 2026-08-07 15:04:05 前扫码登录 👇"},
@@ -427,17 +454,20 @@ export function parseXhsQrcodeContents(
     return { alreadyLoggedIn: /已处于登录状态|已登录/.test(text), ...(text ? { hint: text } : {}) };
   }
   const raw = image.data as string;
-  let dataUrl: string;
-  if (/^data:image\//.test(raw)) {
-    dataUrl = raw;
+  let dataUrl: string | null = null;
+  const dataUrlMatch = raw.match(/^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i);
+  if (dataUrlMatch) {
+    dataUrl = inlineVerifiedImage(Buffer.from(dataUrlMatch[2].replace(/\s/g, ""), "base64"));
   } else if (/^[A-Za-z0-9+/=\s]+$/.test(raw) && raw.replace(/\s/g, "").length > 64) {
-    dataUrl = `data:${image.mimeType || "image/png"};base64,${raw.replace(/\s/g, "")}`;
+    dataUrl = inlineVerifiedImage(Buffer.from(raw.replace(/\s/g, ""), "base64"));
   } else if (isXhsAllowedLocalImagePath(raw) && fs.existsSync(raw)) {
     // 偶发返回本地临时图片路径：读成 base64 内联，前端无需再访问 MCP 机器文件。
     // 任务 #99：先过目录白名单（仅临时目录/tools\xhs-mcp），防 MCP 返回任意路径被无差别读取
-    const buf = fs.readFileSync(raw);
-    dataUrl = `data:image/png;base64,${buf.toString("base64")}`;
-  } else {
+    const size = fs.statSync(raw).size;
+    if (size > 0 && size <= XHS_QRCODE_MAX_BYTES)
+      dataUrl = inlineVerifiedImage(fs.readFileSync(raw));
+  }
+  if (!dataUrl) {
     return { alreadyLoggedIn: false, ...(text ? { hint: text } : {}) };
   }
   const m = text.match(/(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/);

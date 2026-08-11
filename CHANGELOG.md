@@ -1,4 +1,28 @@
-# Changelog
+# 变更记录
+
+## 0.2.0 — 2026-08-11
+
+### 新增
+
+- Hosted 账号注册和登录，以及按用户隔离的配方、豆子、历史记录、模型设置和外部会话。
+- 支持 OpenAI/GPT、Claude、Kimi、DeepSeek、Qwen、Gemini 和自定义 OpenAI-compatible 端点的个人 BYOK 模型配置。
+- 保存个人模型设置前进行模型发现和连接测试。
+- 每个用户独立的 xBloom 云端登录、配方上传和云端配方管理。
+- EdgeOne 前端/API Relay 加 Cloudflare Worker/D1 的中国入口说明。
+- Hosted 用户可选的本地小红书助手配对流程。
+
+### 变更
+
+- Hosted 密码改用浏览器端 600,000 次 PBKDF2 + Worker 独立 pepper 校验，适配 Free 套餐 CPU 配额并避免提交明文密码。
+- Hosted 部署文档现在以账号自己的 BYOK 为默认方式；部署者共享模型（guest model）作为可选备用连接。
+- 公开文档现在区分 Hosted 云端版和 Windows 本地版，并说明凭证归属、隐私边界和全新电脑安装步骤。
+- Windows 安装说明改为按解压目录计算路径，覆盖空格、中文路径和 exFAT/FAT 依赖处理，不要求固定盘符。
+- xBloom 文档同时说明 Hosted 每用户云端同步和 Windows 本地流程。
+- 配置、架构、功能、发布和中国部署链接按 0.2 流程整理。
+
+### 验证
+
+- 使用 `npm run verify`，测试数量以当前检出版本的实际输出为准；本文不固定测试总数。
 
 ## 0.1.1 — 2026-08-11
 

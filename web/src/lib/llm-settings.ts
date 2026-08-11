@@ -9,6 +9,7 @@ export interface LlmSettingsDraft {
 }
 
 export interface LlmSettingsUpdateInput {
+  provider?: "openai-compatible" | "anthropic" | "gemini";
   baseUrl: string;
   model: string;
   fallbackModel: string;

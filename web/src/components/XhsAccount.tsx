@@ -10,6 +10,7 @@ import { api, type XhsStatus, xhsFailureKindFromError } from "../lib/api.js";
 import { xhsQrFailureCopy, type XhsQrFailureKind } from "../lib/xhs-qr.js";
 import { btnGhost, btnPrimary, btnText, Modal, Spinner, StatusDot } from "./ui.js";
 import { createPortal } from "react-dom";
+import { hostedPage, pairCompanion } from "../lib/companion.js";
 
 /** 二维码展示态状态机 */
 type QrPhase = "idle" | "loading" | "code" | "expired" | "confirmed" | "already" | "error";
@@ -46,6 +47,7 @@ export default function XhsAccount({
   const [importFailed, setImportFailed] = useState(false);
   /** 登录说明折叠态（任务 #126：已登录态默认折叠） */
   const [infoOpen, setInfoOpen] = useState(false);
+  const [pairBusy, setPairBusy] = useState(false);
   /** 状态探活与账号操作各自使用序列号，晚到响应不得覆盖新状态。 */
   const statusRequestIdRef = useRef(0);
   const operationIdRef = useRef(0);
@@ -183,6 +185,19 @@ export default function XhsAccount({
     void refreshStatus();
   };
 
+  const connectCompanion = async () => {
+    setPairBusy(true);
+    setQrError("");
+    try {
+      await pairCompanion();
+      await refreshStatus();
+    } catch (error) {
+      setQrError((error as Error).message);
+    } finally {
+      setPairBusy(false);
+    }
+  };
+
   /**
    * 任务 #99：关闭弹窗时若扫码流程仍在进行中（取码中/展示码），一并重置为 idle，
    * 让 2.5s 轮询与 1s 倒计时两个 effect 随依赖变化自然清理，不后台空转到过期。
@@ -298,7 +313,9 @@ export default function XhsAccount({
                     <span className="text-[var(--tx-2)]">正在检查登录状态…</span>
                   ) : !status.online ? (
                     <span className="text-[var(--tx-2)]">
-                      小红书本地服务未启动 —— 请确认 xiaohongshu-mcp 常驻服务已运行
+                      {hostedPage()
+                        ? "网页尚未连接这台电脑上的小红书助手"
+                        : "小红书本地服务未启动 —— 请确认 xiaohongshu-mcp 常驻服务已运行"}
                     </span>
                   ) : loggedIn ? (
                     <span>
@@ -322,6 +339,16 @@ export default function XhsAccount({
                 </div>
                 {/* 动作区：登出/刷新降为 ghost 文本按钮（任务 #126），保留原 onClick */}
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-[var(--line)] px-5 py-3">
+                  {offline && hostedPage() && (
+                    <button
+                      type="button"
+                      className={btnPrimary}
+                      onClick={() => void connectCompanion()}
+                      disabled={pairBusy}
+                    >
+                      {pairBusy && <Spinner />} 连接本地助手
+                    </button>
+                  )}
                   {status?.online !== false &&
                     !loggedIn &&
                     qrPhase !== "code" &&
@@ -362,6 +389,9 @@ export default function XhsAccount({
                   >
                     刷新状态
                   </button>
+                  {qrError && offline && hostedPage() && (
+                    <span className="text-[11px] text-[var(--bad)]">{qrError}</span>
+                  )}
                 </div>
               </div>
 

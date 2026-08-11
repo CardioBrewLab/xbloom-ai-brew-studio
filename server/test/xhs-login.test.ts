@@ -98,7 +98,7 @@ describe("parseXhsQrcodeContents 二维码解析", () => {
     assert.equal(qr.expiresAt, new Date("2026-08-07T10:05:00").getTime());
   });
 
-  it("data: URL 原样保留；截止时间已过/缺失时用兜底 TTL", () => {
+  it("data: URL 按真实图片类型规范化；截止时间已过/缺失时用兜底 TTL", () => {
     const dataUrl = `data:image/jpeg;base64,${TINY_PNG_B64}`;
     const qr1 = parseXhsQrcodeContents(
       [
@@ -107,7 +107,7 @@ describe("parseXhsQrcodeContents 二维码解析", () => {
       ],
       NOW,
     );
-    assert.equal(qr1.qrcode, dataUrl);
+    assert.equal(qr1.qrcode, `data:image/png;base64,${TINY_PNG_B64}`);
     assert.equal(qr1.expiresAt, NOW + XHS_QRCODE_FALLBACK_TTL_MS);
     const qr2 = parseXhsQrcodeContents([{ type: "image", data: TINY_PNG_B64 }], NOW);
     assert.equal(qr2.expiresAt, NOW + XHS_QRCODE_FALLBACK_TTL_MS);
@@ -115,16 +115,21 @@ describe("parseXhsQrcodeContents 二维码解析", () => {
   });
 
   it("本地临时图片路径读成 base64 内联", () => {
-    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "xhs-qr-")), "qr.png");
-    fs.writeFileSync(file, Buffer.from(TINY_PNG_B64, "base64"));
-    const qr = parseXhsQrcodeContents(
-      [
-        { type: "text", text: "请用小红书 App 在 2026-08-07 10:05:00 前扫码登录" },
-        { type: "image", data: file },
-      ],
-      NOW,
-    );
-    assert.equal(qr.qrcode, `data:image/png;base64,${TINY_PNG_B64}`);
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "xhs-qr-"));
+    try {
+      const file = path.join(directory, "qr.png");
+      fs.writeFileSync(file, Buffer.from(TINY_PNG_B64, "base64"));
+      const qr = parseXhsQrcodeContents(
+        [
+          { type: "text", text: "请用小红书 App 在 2026-08-07 10:05:00 前扫码登录" },
+          { type: "image", data: file },
+        ],
+        NOW,
+      );
+      assert.equal(qr.qrcode, `data:image/png;base64,${TINY_PNG_B64}`);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("已登录短路：仅文本「你当前已处于登录状态」，无二维码", () => {

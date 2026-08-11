@@ -39,6 +39,11 @@ import { constants, publicEncrypt } from "node:crypto";
 import * as undici from "undici";
 import type { Dispatcher, RequestInit as UndiciRequestInit } from "undici";
 import { config } from "../config.js";
+import {
+  alignIntegerPours,
+  toCloudPayload,
+  type CloudPayloadResult,
+} from "@xbloom/shared/xbloom-cloud-payload";
 import { atomicWriteJson } from "./data-io.js";
 import {
   protectCurrentUserText,
@@ -50,8 +55,6 @@ import {
   cloudToPattern,
   isReachableCloudTotal,
   nearestReachableCloudTotal,
-  patternToCloud,
-  pourName,
   type CupType,
   type Recipe,
   type RecipeCore,
@@ -73,6 +76,7 @@ export function isCnRegion(): boolean {
 
 export const API_BASE = isCnRegion() ? API_BASE_CN : API_BASE_GLOBAL;
 export const SHARE_BASE = isCnRegion() ? SHARE_BASE_CN : SHARE_BASE_GLOBAL;
+const r1 = (value: number): number => Math.round(value * 10) / 10;
 
 /** xBloom 服务端 RSA-1024 公钥（DER/base64，照抄 xbloom-agent） */
 const RSA_PUBLIC_KEY_B64 =
@@ -495,8 +499,6 @@ export function buildShareUrl(tableId: number | string): string {
  * 对照源码确认：2 = 咖啡（手冲/xDripper，源码咖啡配方固定 cupType:2）；
  * 3 = 其他器具；4 = 茶。本产品纯手冲语境，other 一律映射 3。
  */
-const CUP_TYPE_TO_CLOUD: Record<CupType, number> = { xdripper: 2, other: 3 };
-
 /** 云端 cupType → 内部 cupType；2 = xdripper，其余（含历史遗留编码）保守归为 "other"（读取路径不抛错） */
 export function cloudToCupType(code: unknown): CupType {
   if (code === 2) return "xdripper";
@@ -506,209 +508,15 @@ export function cloudToCupType(code: unknown): CupType {
 // ---------------------------------------------------------------------------
 // 内部配方 → 云端 payload（集中转换，字段映射见注释）
 // ---------------------------------------------------------------------------
+// Shared xBloom cloud payload mapping
+// ---------------------------------------------------------------------------
 
-/**
- * 把内部配方转换为 tuRecipeAdd/tuRecipeUpdate.tuhtml 的 payload（未含鉴权字段）。
- *
- * 字段映射（对照 xbloom-agent createRecipe / buildPourList）：
- * - theName         ← recipe.name（或调用方指定的覆盖名）
- * - dose            ← doseGrams（粉量 g）
- * - grandWater      ← grandWater / doseGrams —— 云端该字段语义是【粉水比 ratio】！
- * - grinderSize     ← grinderSize（云端标尺 40-120，同语义直传）
- * - rpm             ← rpm
- * - cupType         ← cupType 经 CUP_TYPE_TO_CLOUD 映射（xdripper→2, other→3）
- * - isEnableBypassWater ← bypassEnabled ? 1 : 2；关闭时 bypassTemp/bypassVolume
- *   照官方默认 {isEnableBypassWater:2, bypassTemp:85.0, bypassVolume:5.0} 发送
- * - isSetGrinderSize ← 1 本机磨豆 / 2 预磨粉
- * - theColor        ← recipe.theColor（默认 #C9D5B8）
- * - pourDataJSONStr ← pours JSON 字符串；每段：
- *     theName ← pourName（缺省 Bloom/Pour n）、volume(ml)、temperature(℃)、
- *     flowRate(mL/s)、pattern ← patternToCloud（center→1, spiral→2, circular→3）、
- *     pausing(s)、isEnableVibrationBefore/After ← vibBefore/vibAfter ? 1 : 2
- * - 其余固定字段（adaptedModel/theSubsetId/subSetType/appPlace/isShortcuts）照抄源码默认值
- *
- * 【浇注指令对齐】官方链路有两道 ratio 一致性关卡（2026-08-04 实测 T1-T13 +
- * 任务#41 APK 逆向结论双重确认），不一致即报"此配方下的浇注指令异常"：
- * 1. 云端 API：强校验 Σ各段注水 和 dose×ratio 一致（单向容差：Σ 高于
- *    dose×round2(ratio) 即使 0.02ml 也被拒，略低 ≤0.04ml 可过）；
- * 2. 官方 App/机器：ratio 按 0.1 步进（BLE 配方尾字节 = int(ratio×10)），
- *    App 校验 dose×ratio == Σ各段，机器用 Σ÷dose 反算 ratio 尾字节，
- *    不匹配即拒绝加载（App 兜底报"请检查手机蓝牙"）。
- * 【任务#45 用户真机实测追加】App 侧校验比云端发布接口更严：
- * - 各段水量必须为**整数毫升**（等比缩放产生的 39.6ml 小数段会被拒，
- *   报"分段水量综合与粉水比不符"）；
- * - Σ分段 == dose×ratio 必须**精确相等**（云端 ±0.04 容差在 App 侧不成立）。
- * 因此本函数把 ratio 钳到一位小数，把总水对齐到"可达总水量"
- * （定义：round1(dose × round1(T/dose)) === T 的整数 T；dose=12 时 200 不可达，
- * 就近圆整到 198=12×16.5 或 204=12×17），并用**最大余数法**把各段取整为
- * 整数毫升（差额吸收），保证 Σ整数段 == 对齐后总水 == dose×ratio 精确成立，
- * 单段 ≥1ml 且 ≤300ml（SAFE_LIMITS.pourVolume）。对齐细节写入返回的
- * adjustments 供前端如实展示；发布后由 readBackCloudRecipe 回读验证等式。
- */
-export interface CloudPayloadResult {
-  payload: Record<string, unknown>;
-  /** 对齐产生的实际上传值变化（空数组表示原值即为上传值） */
-  adjustments: string[];
-  /** 对齐后的总水量（ml）= Σ 各段 volume */
-  alignedGrandWater: number;
-  /** 对齐后的各段注水（内部模型形态，供调用方重建一致配方） */
-  alignedPours: RecipeCore["pours"];
-}
-
-const r1 = (v: number): number => Math.round(v * 10) / 10;
-
-/** 单段水量下限（ml）：官方 App 不接受 0ml 段 */
-const MIN_POUR_ML = 1;
-/** 单段水量上限（ml）：同 SAFE_LIMITS.pourVolume.max（机器单段上限） */
-const MAX_POUR_ML = 300;
-
-/**
- * 最大余数法整数分配：把缩放后的小数段取整为整数毫升，保证 Σ == target 精确成立。
- * 约束：每段 ∈ [minV, maxV]。不可行（总水太少/太多无法分配）时抛错。
- * Bloom 段等语义由各段自身字段携带，本函数只管 volume 数值。
- */
-export function alignIntegerPours(
-  scaled: number[],
-  target: number,
-  minV: number = MIN_POUR_ML,
-  maxV: number = MAX_POUR_ML,
-): number[] {
-  const n = scaled.length;
-  if (!n) throw new Error("无注水段可分配");
-  if (target < n * minV) {
-    throw new Error(`总水量 ${target}ml 过小，无法分给 ${n} 段（每段至少 ${minV}ml）`);
-  }
-  if (target > n * maxV) {
-    throw new Error(`总水量 ${target}ml 过大，${n} 段每段上限 ${maxV}ml 也装不下`);
-  }
-  // 1. 向下取整（保底 minV），剩余毫升按小数部分从大到小补齐
-  const out = scaled.map((v) => Math.max(minV, Math.floor(v)));
-  let remaining = target - out.reduce((s, v) => s + v, 0);
-  const order = scaled
-    .map((v, i) => ({ i, frac: out[i] > Math.floor(v) ? -1 : v - Math.floor(v) }))
-    .sort((a, b) => b.frac - a.frac);
-  for (const { i } of order) {
-    if (remaining <= 0) break;
-    out[i] += 1;
-    remaining -= 1;
-  }
-  // 保底抬升可能导致 remaining < 0：从最大段扣回（不低于 minV）
-  while (remaining < 0) {
-    let idx = -1;
-    for (let i = 0; i < n; i++) {
-      if (out[i] > minV && (idx < 0 || out[i] > out[idx])) idx = i;
-    }
-    if (idx < 0) throw new Error(`总水量 ${target}ml 无法在 ${n} 段间分配（每段至少 ${minV}ml）`);
-    const take = Math.min(-remaining, out[idx] - minV);
-    out[idx] -= take;
-    remaining += take;
-  }
-  // remaining > 0 兼底（理论不会发生）：轮补
-  for (let i = 0; remaining > 0; i = (i + 1) % n) {
-    out[i] += 1;
-    remaining -= 1;
-  }
-  // 2. 单段上限：超限部分搬到最小段（最小段满则次小），保持 Σ 不变
-  for (let guard = 0; guard < n * maxV; guard++) {
-    let hi = 0;
-    let lo = 0;
-    for (let i = 1; i < n; i++) {
-      if (out[i] > out[hi]) hi = i;
-      if (out[i] < out[lo]) lo = i;
-    }
-    if (out[hi] <= maxV) break;
-    if (lo === hi || out[lo] >= maxV) {
-      throw new Error(`总水量 ${target}ml 超出 ${n} 段每段 ≤${maxV}ml 的可分配上限`);
-    }
-    const move = Math.min(out[hi] - maxV, maxV - out[lo]);
-    out[hi] -= move;
-    out[lo] += move;
-  }
-  return out;
-}
-
-/** 可达总水量判定与就近搜索：实现在 recipe-schema（事实源），此处只做转出 */
+/** Desktop and hosted editions share one ratio/integer-pour implementation. */
+export { alignIntegerPours, toCloudPayload };
+export type { CloudPayloadResult };
 export const isReachableTotal = isReachableCloudTotal;
 export const nearestReachableTotal = nearestReachableCloudTotal;
 
-/** 内部配方 → 云端 payload（含浇注指令对齐），返回值含 adjustments */
-export function toCloudPayload(recipe: RecipeCore, name?: string): CloudPayloadResult {
-  const sum0 = r1(recipe.pours.reduce((s, p) => s + p.volume, 0));
-  const target = nearestReachableTotal(recipe.doseGrams, sum0);
-  const ratio = r1(target / recipe.doseGrams); // 一位小数，0.1 步进（BLE 尾字节 = ratio×10）
-  const adjustments: string[] = [];
-
-  let pours = recipe.pours.map((p) => ({ ...p }));
-  if (Math.abs(sum0 - target) > 1e-9 && sum0 > 0) {
-    adjustments.push(
-      `总水量: ${sum0}ml → ${target}ml（官方要求浇注段总量与粉水比 1:${ratio} × ${recipe.doseGrams}g 精确对齐，否则报"浇注指令异常"）`,
-    );
-  }
-  // 任务#45：官方 App 要求各段水量为整数毫升且 Σ 与 dose×ratio 精确相等。
-  // 等比缩放到目标总水后用最大余数法取整（即使总水未变也要整数化，
-  // 小数段如 39.6ml 会被 App 拒："分段水量综合与粉水比不符"）。
-  const origVols = recipe.pours.map((p) => p.volume);
-  const scale = sum0 > 0 ? target / sum0 : 1;
-  const alignedVols = alignIntegerPours(
-    origVols.map((v) => v * scale),
-    target,
-  );
-  if (alignedVols.some((v, i) => v !== origVols[i])) {
-    adjustments.push(
-      `分段水量: [${origVols.join(", ")}] → [${alignedVols.join(", ")}]ml（官方 App 要求各段为整数毫升，且 Σ分段 == 粉量 × 粉水比 精确相等）`,
-    );
-    pours = pours.map((p, i) => ({ ...p, volume: alignedVols[i] }));
-  }
-  const sum = alignedVols.reduce((s, v) => s + v, 0);
-  // 终检保护（Kim 审查必改）：对齐结果必须每段 ≥1ml 且 Σ 恒等于对齐总水，
-  // 否则宁可拒绝发布也不静默上传 0ml/负值段（机器会拒载）
-  if (alignedVols.some((v) => !Number.isInteger(v) || v < MIN_POUR_ML) || sum !== target) {
-    throw new Error(
-      `浇注对齐结果非法（Σ=${sum} ≠ ${target} 或存在 <${MIN_POUR_ML}ml 的分段 [${alignedVols.join(", ")}]），请调整分段水量后重试`,
-    );
-  }
-
-  const pourList = pours.map((p, i) => ({
-    theName: pourName(p, i),
-    volume: p.volume,
-    temperature: p.temperature,
-    flowRate: p.flowRate,
-    pattern: patternToCloud(p.pattern),
-    pausing: p.pausing,
-    isEnableVibrationBefore: p.vibBefore ? 1 : 2,
-    isEnableVibrationAfter: p.vibAfter ? 1 : 2,
-  }));
-  const bypassOn = recipe.bypassEnabled === true;
-  return {
-    adjustments,
-    alignedGrandWater: sum,
-    alignedPours: pours,
-    payload: {
-      theName: name ?? recipe.name,
-      dose: recipe.doseGrams,
-      grandWater: ratio, // 云端语义 = 粉水比，不是总水量
-      grinderSize: recipe.grinderSize,
-      rpm: recipe.rpm,
-      cupType: CUP_TYPE_TO_CLOUD[recipe.cupType],
-      adaptedModel: 1,
-      isEnableBypassWater: bypassOn ? 1 : 2,
-      isSetGrinderSize: recipe.isSetGrinderSize ?? 1,
-      theColor: recipe.theColor ?? "#C9D5B8",
-      theSubsetId: 0,
-      // 官方约定：旁路关闭时仍照发默认值 85.0 / 5.0
-      bypassTemp: bypassOn ? (recipe.bypassTemp ?? 85.0) : 85.0,
-      bypassVolume: bypassOn ? (recipe.bypassVolume ?? 5.0) : 5.0,
-      subSetType: 2,
-      appPlace: [4],
-      createTimeStamp: Date.now(),
-      isShortcuts: 2,
-      pourDataJSONStr: JSON.stringify(pourList),
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// 发布配方
 // ---------------------------------------------------------------------------
 
 export interface PublishResult {

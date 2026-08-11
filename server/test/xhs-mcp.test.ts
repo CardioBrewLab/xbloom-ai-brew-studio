@@ -398,4 +398,19 @@ describe("parseXhsQrcodeContents 本地路径分支（任务 #99：防任意文�
       fs.rmSync(tmp, { force: true });
     }
   });
+
+  it("临时目录内的普通文本即使伪装成 png 也不读取", () => {
+    const tmp = path.join(os.tmpdir(), "xhs-t99-fake-" + Date.now() + ".png");
+    fs.writeFileSync(tmp, JSON.stringify({ secret: "not-an-image" }));
+    try {
+      const result = parseXhsQrcodeContents([
+        { type: "text", text: qrText },
+        { type: "image", mimeType: "image/png", data: tmp },
+      ]);
+      assert.equal(result.qrcode, undefined);
+      assert.equal(result.hint, qrText);
+    } finally {
+      fs.rmSync(tmp, { force: true });
+    }
+  });
 });

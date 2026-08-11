@@ -1,6 +1,11 @@
 /** 模型接口设置弹窗：Key 仅提交给本机后端，读取时只显示是否已配置。 */
 import { useEffect, useState } from "react";
-import { api, type LlmSettingsPublic } from "../lib/api.js";
+import {
+  api,
+  type LlmSettingsPublic,
+  type ModelProvider,
+  type ModelProviderPreset,
+} from "../lib/api.js";
 import { buildLlmSettingsUpdate, type LlmSettingsDraft } from "../lib/llm-settings.js";
 import { btnGhost, btnPrimary, Field, inputCls, Modal, Spinner } from "./ui.js";
 
@@ -27,6 +32,10 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
   const [testResult, setTestResult] = useState("");
+  const [provider, setProvider] = useState<ModelProvider>("openai-compatible");
+  const [providers, setProviders] = useState<ModelProviderPreset[]>([]);
+  const [detectedModels, setDetectedModels] = useState<string[]>([]);
+  const [detecting, setDetecting] = useState(false);
 
   const hydrate = (next: LlmSettingsPublic) => {
     setSettings(next);
@@ -38,6 +47,7 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
       apiKey: "",
       fallbackApiKey: "",
     });
+    setProvider(next.provider ?? "openai-compatible");
   };
 
   useEffect(() => {
@@ -47,10 +57,12 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
     setError("");
     setSaved(false);
     setTestResult("");
-    api
-      .getLlmSettings()
-      .then((next) => {
-        if (!cancelled) hydrate(next);
+    Promise.all([api.getLlmSettings(), api.listLlmProviders().catch(() => [])])
+      .then(([next, available]) => {
+        if (!cancelled) {
+          hydrate(next);
+          setProviders(available);
+        }
       })
       .catch((reason) => {
         if (!cancelled) setError((reason as Error).message);
@@ -69,6 +81,37 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
     setTestResult("");
   };
 
+  const selectPreset = (preset: ModelProviderPreset) => {
+    setProvider(preset.provider);
+    setDraft((current) => ({ ...current, baseUrl: preset.baseUrl, model: "" }));
+    setDetectedModels([]);
+    setSaved(false);
+    setTestResult("");
+  };
+
+  const detect = async () => {
+    setError("");
+    setSaved(false);
+    setDetecting(true);
+    try {
+      const result = await api.detectLlmModels({
+        provider,
+        baseUrl: draft.baseUrl.trim(),
+        ...(draft.apiKey.trim() ? { apiKey: draft.apiKey.trim() } : {}),
+      });
+      setProvider(result.provider);
+      setDetectedModels(result.models);
+      if (!draft.model.trim() || !result.models.includes(draft.model.trim())) {
+        updateDraft("model", result.models[0] ?? "");
+      }
+      setTestResult(`已识别 ${result.models.length} 个模型 · ${result.latencyMs}ms`);
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setDetecting(false);
+    }
+  };
+
   const save = async () => {
     setError("");
     setSaved(false);
@@ -85,17 +128,17 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
         );
         if (!confirmed) return;
       }
-      payload = buildLlmSettingsUpdate(draft, confirmed);
+      payload = { ...buildLlmSettingsUpdate(draft, confirmed), provider };
     } catch (reason) {
       setError((reason as Error).message);
       return;
     }
     setSaving(true);
     try {
-      const next = await api.updateLlmSettings(payload);
-      hydrate(next);
+      const result = await api.updateLlmSettings(payload);
+      hydrate(result.settings);
       await onApplied?.();
-      const checked = await api.testLlmSettings();
+      const checked = result.test ?? (await api.testLlmSettings());
       setTestResult(`${checked.model} · ${checked.latencyMs}ms`);
       setSaved(true);
     } catch (reason) {
@@ -106,7 +149,11 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
   };
 
   const reset = async () => {
-    const confirmed = window.confirm("恢复后将重新使用 .env 中的模型设置。继续吗？");
+    const confirmed = window.confirm(
+      settings?.source === "user"
+        ? "清除后，这个账号将不再保存当前模型连接。继续吗？"
+        : "恢复后将重新使用 .env 中的模型设置。继续吗？",
+    );
     if (!confirmed) return;
     setSaving(true);
     setError("");
@@ -138,9 +185,8 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
       ) : (
         <div className="space-y-5">
           <div className="rounded-xl border border-[var(--line)] bg-[var(--bg-inset)] px-4 py-3 text-xs leading-relaxed text-[var(--tx-2)]">
-            这里仅调整 AI 模型连接。工作台地址、xBloom 官方云端、小红书账号和手机 App
-            上传流程保持原样。 外部地址使用 HTTPS；本机模型服务可使用 localhost / 127.0.0.1 的 HTTP
-            地址。
+            这里只保存模型连接。xBloom 官方账号、小红书登录和手机 App 上传流程彼此独立。
+            云端配置按当前账号加密保存；本地版由当前 Windows 用户保护密钥。
           </div>
 
           {settings?.localOverridePresent && !settings.localOverrideValid && (
@@ -149,21 +195,45 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
             </div>
           )}
 
-          <Field label="模型 API 地址" hint="OpenAI 兼容接口">
+          {providers.length > 0 && (
+            <div>
+              <p className="mb-2 text-xs font-medium text-[var(--tx-2)]">选择服务</p>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                {providers.map((preset) => {
+                  const selected =
+                    provider === preset.provider &&
+                    draft.baseUrl.replace(/\/+$/, "") === preset.baseUrl.replace(/\/+$/, "");
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => selectPreset(preset)}
+                      className={`rounded-xl border px-3 py-2.5 text-left transition-colors ${
+                        selected
+                          ? "border-[var(--acc)] bg-[var(--acc-soft)] text-[var(--acc)]"
+                          : "border-[var(--line)] bg-[var(--bg-card)] text-[var(--tx-2)] hover:border-[var(--line-strong)]"
+                      }`}
+                    >
+                      <span className="block text-xs font-semibold">{preset.label}</span>
+                      <span className="mt-1 block truncate text-[10px] opacity-70">
+                        {preset.domestic
+                          ? "国内服务"
+                          : preset.id === "custom"
+                            ? "兼容网关"
+                            : "海外服务"}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <Field label="模型 API 地址" hint="支持官方接口与 OpenAI 兼容网关">
             <input
               value={draft.baseUrl}
               onChange={(event) => updateDraft("baseUrl", event.target.value)}
               placeholder="https://example.com/v1"
-              spellCheck={false}
-              className={`${inputCls} font-mono text-xs`}
-            />
-          </Field>
-
-          <Field label="主模型">
-            <input
-              value={draft.model}
-              onChange={(event) => updateDraft("model", event.target.value)}
-              placeholder="模型名称"
               spellCheck={false}
               className={`${inputCls} font-mono text-xs`}
             />
@@ -183,6 +253,41 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
               className={`${inputCls} font-mono text-xs`}
             />
           </Field>
+
+          <div className="flex items-end gap-2">
+            <div className="min-w-0 flex-1">
+              <Field
+                label="主模型"
+                hint={detectedModels.length ? "从接口实时读取" : "可手动填写模型 ID"}
+              >
+                <input
+                  value={draft.model}
+                  onChange={(event) => updateDraft("model", event.target.value)}
+                  placeholder="先识别模型，或手动输入"
+                  spellCheck={false}
+                  list="xbloom-model-options"
+                  className={`${inputCls} font-mono text-xs`}
+                />
+                <datalist id="xbloom-model-options">
+                  {detectedModels.map((model) => (
+                    <option key={model} value={model} />
+                  ))}
+                </datalist>
+              </Field>
+            </div>
+            <button
+              type="button"
+              onClick={() => void detect()}
+              disabled={
+                detecting ||
+                !draft.baseUrl.trim() ||
+                (!draft.apiKey.trim() && !settings?.apiKeyConfigured)
+              }
+              className={`${btnGhost} h-10 shrink-0`}
+            >
+              {detecting ? <Spinner /> : null} 识别模型
+            </button>
+          </div>
 
           <details className="rounded-xl border border-[var(--line)] bg-[var(--bg-inset)]">
             <summary className="cursor-pointer px-4 py-3 text-xs font-medium text-[var(--tx-2)]">
@@ -230,8 +335,16 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
 
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line)] pt-4">
             <div className="text-[11px] leading-4 text-[var(--tx-3)]">
-              <p>{settings?.source === "local" ? "正在使用本机覆盖设置" : "正在使用 .env 设置"}</p>
-              <p>Key 由当前 Windows 用户加密保护，页面读取不到已保存的原文。</p>
+              <p>
+                {settings?.source === "user"
+                  ? "正在使用当前账号的个人配置"
+                  : settings?.source === "local"
+                    ? "正在使用本机覆盖设置"
+                    : settings?.source === "unconfigured"
+                      ? "当前账号尚未配置模型"
+                      : "正在使用部署环境设置"}
+              </p>
+              <p>页面只读取“已配置”状态，不读取已保存的 Key 原文。</p>
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -240,7 +353,7 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
                 disabled={saving || !settings?.localOverridePresent}
                 className={btnGhost}
               >
-                恢复 .env
+                {settings?.source === "user" ? "清除个人配置" : "恢复 .env"}
               </button>
               <button
                 type="button"

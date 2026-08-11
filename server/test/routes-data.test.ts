@@ -633,6 +633,18 @@ describe("LLM 双 key 兜底配置", () => {
       assert.notEqual(apiKey, fallbackApiKey);
     }
   });
+
+  it("keyForModel：原生 Anthropic 协议不读取兼容网关的兜底 key", () => {
+    const previous = { ...config.llm };
+    try {
+      config.llm.provider = "anthropic";
+      config.llm.apiKey = "native-primary";
+      config.llm.fallbackApiKey = "gateway-fallback";
+      assert.equal(keyForModel("claude-model"), "native-primary");
+    } finally {
+      Object.assign(config.llm, previous);
+    }
+  });
 });
 
 describe("规则优先级与冲突裁决提示词（任务 #60）", () => {

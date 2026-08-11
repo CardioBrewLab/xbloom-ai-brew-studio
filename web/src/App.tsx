@@ -33,6 +33,7 @@ import {
   type ReviewFinding,
   type SavedRecipe,
   type ServerConfig,
+  type AuthSession,
 } from "./lib/api.js";
 import { buildCurve, curveStateAt } from "./lib/curve-math.js";
 import {
@@ -54,11 +55,13 @@ import {
   type VariantState,
 } from "./lib/variant.js";
 import { saveCompletionIsCurrent } from "./lib/save-state.js";
+import { companionConfig, companionResearch, hostedPage } from "./lib/companion.js";
 
 // Heavy charts, QR generation, secondary pages and modal workflows stay out of
 // the initial desktop shell. This keeps the first workbench paint small while
 // preserving every workflow once the user opens it.
 const ApiSettingsModal = lazy(() => import("./components/ApiSettingsModal.js"));
+const AccountModal = lazy(() => import("./components/AccountModal.js"));
 const BrewGuide = lazy(() => import("./components/BrewGuide.js"));
 const CurveChart = lazy(() => import("./components/CurveChart.js"));
 const FeedbackModal = lazy(() => import("./components/FeedbackModal.js"));
@@ -155,14 +158,18 @@ export default function App() {
   const [config, setConfig] = useState<ServerConfig | null>(null);
   const [cloud, setCloud] = useState<CloudStatus | null>(null);
   const [backendUp, setBackendUp] = useState(true);
+  const [account, setAccount] = useState<AuthSession | null>(null);
+  const [accountOpen, setAccountOpen] = useState(false);
 
   const refreshConfig = useCallback(async () => {
     try {
       const next = await api.getConfig();
       setConfig(next);
       setBackendUp(true);
+      return next;
     } catch {
       setBackendUp(false);
+      return null;
     }
   }, []);
 
@@ -177,6 +184,25 @@ export default function App() {
     void refreshConfig();
     refreshCloud();
   }, [refreshCloud, refreshConfig]);
+
+  useEffect(() => {
+    if (config?.deployment !== "cloudflare") return;
+    let cancelled = false;
+    api
+      .authSession()
+      .then((next) => {
+        if (cancelled) return;
+        setAccount(next);
+        if (!next.authenticated) setAccountOpen(true);
+        else if (!config.modelConfigured) setSettingsOpen(true);
+      })
+      .catch(() => {
+        if (!cancelled) setAccount(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [config?.deployment, config?.modelConfigured]);
 
   // ---- 豆库（三态：loading/ready/failed，失败才显示离线提示，任务 #65） ----
   const [beans, setBeans] = useState<Bean[] | null>(null);
@@ -394,256 +420,287 @@ export default function App() {
       setPlayheadOn(false);
       setGuideOpen(false); // 新一轮生成 → 关闭旧配方的引导冲煮（任务 #95）
 
-      void streamGenerate(
-        req,
-        {
-          onEvent: (event) => {
+      const runGeneration = async () => {
+        let payload = req;
+        if (hostedPage() && req.mode !== "fast" && companionConfig()) {
+          setResearch({
+            phase: "searching",
+            message: "正在通过本地助手整理公开资料…",
+            sources: [],
+          });
+          try {
+            const packet = await companionResearch({
+              freeText: req.beans || req.description,
+              tastingNotes: req.taste,
+            });
             if (stale()) return;
-            switch (event.type) {
-              // 任务 #130：beanMatch 事件——自由文本匹配到豆仓豆，存储 beanId 供 recipe 事件建 genMeta 用
-              case "beanMatch":
-                matchedBeanIdRef.current = event.beanId;
-                break;
-              case "research":
-                if (event.stage === "start") {
-                  setResearch((previous) => ({
-                    phase: "searching",
-                    message: event.query ? `正在联网调研：${event.query}` : "正在联网调研…",
-                    sources: event.round && event.round > 0 ? previous.sources : [],
-                    ...(event.round ? { round: event.round } : {}),
-                  }));
-                } else if (event.stage === "source") {
-                  setResearch((r) =>
-                    r.phase === "idle" || !event.title || !event.url
-                      ? r
-                      : {
-                          ...r,
-                          sources: r.sources.some((s) => s.url === event.url)
-                            ? r.sources
-                            : [
-                                ...r.sources,
-                                {
-                                  title: event.title,
-                                  url: event.url,
-                                  ...(event.snippet ? { snippet: event.snippet } : {}),
-                                },
-                              ],
-                        },
+            payload = { ...req, researchPacket: packet };
+          } catch (reason) {
+            if (stale()) return;
+            setResearch({
+              phase: "done",
+              ok: false,
+              message: `本地调研未接入本次生成：${(reason as Error).message}`,
+              sources: [],
+            });
+          }
+        }
+        await streamGenerate(
+          payload,
+          {
+            onEvent: (event) => {
+              if (stale()) return;
+              switch (event.type) {
+                // 任务 #130：beanMatch 事件——自由文本匹配到豆仓豆，存储 beanId 供 recipe 事件建 genMeta 用
+                case "beanMatch":
+                  matchedBeanIdRef.current = event.beanId;
+                  break;
+                case "research":
+                  if (event.stage === "start") {
+                    setResearch((previous) => ({
+                      phase: "searching",
+                      message: event.query ? `正在联网调研：${event.query}` : "正在联网调研…",
+                      sources: event.round && event.round > 0 ? previous.sources : [],
+                      ...(event.round ? { round: event.round } : {}),
+                    }));
+                  } else if (event.stage === "source") {
+                    setResearch((r) =>
+                      r.phase === "idle" || !event.title || !event.url
+                        ? r
+                        : {
+                            ...r,
+                            sources: r.sources.some((s) => s.url === event.url)
+                              ? r.sources
+                              : [
+                                  ...r.sources,
+                                  {
+                                    title: event.title,
+                                    url: event.url,
+                                    ...(event.snippet ? { snippet: event.snippet } : {}),
+                                  },
+                                ],
+                          },
+                    );
+                  } else {
+                    if (event.summary) {
+                      const roundLabel = `第 ${(event.round ?? 0) + 1} 轮调研`;
+                      const block = `${roundLabel}\n${event.summary}`;
+                      if (!researchSummaryRef.current.includes(block)) {
+                        researchSummaryRef.current = [researchSummaryRef.current, block]
+                          .filter(Boolean)
+                          .join("\n\n");
+                      }
+                    }
+                    // 小红书登录失效（任务 #83）：顶栏徽标转警示态，不打断生成流程
+                    if (event.xhsLoginExpired) setXhsExpired(true);
+                    setResearch((r) => ({
+                      phase: "done",
+                      message:
+                        event.message ?? (event.ok ? "调研完成" : "未找到公开资料，基于知识库生成"),
+                      sources: [...r.sources, ...(event.sources ?? [])].filter(
+                        (source, index, all) =>
+                          all.findIndex((item) => item.url === source.url) === index,
+                      ),
+                      ok: event.ok ?? false,
+                      summary: event.summary,
+                      ...(event.round ? { round: event.round } : {}),
+                    }));
+                  }
+                  break;
+                case "reasoning":
+                  // 带 variant:"improved" 的增量不并入主思考流，静默累计进对比卡缓冲（任务 #62）
+                  if (event.variant === "improved") {
+                    setVariant((s) => reduceVariantEvent(s, event));
+                    break;
+                  }
+                  setReasoning((r) => r + event.delta);
+                  break;
+                case "review":
+                  // 自动审查事件（任务 #36）：start → 审查中；findings → 首轮问题清单；fixed → 终结态
+                  if (event.stage === "start") {
+                    setReview({ phase: "reviewing", findings: [], fixed: false });
+                  } else if (event.stage === "findings") {
+                    setReview((r) => ({ ...r, preFindings: event.findings ?? [] }));
+                  } else {
+                    setReview((r) => ({
+                      phase: "done",
+                      findings: event.findings ?? [],
+                      preFindings: event.preFindings ?? r.preFindings,
+                      fixed: event.fixed ?? false,
+                      dimensions: event.dimensions,
+                    }));
+                  }
+                  break;
+                case "content":
+                  if (event.variant === "improved") {
+                    setVariant((s) => reduceVariantEvent(s, event));
+                    break;
+                  }
+                  // 标准渲染路径（任务 #114）：收到 content 即标记，recipe 事件不再捕获 winnerJson 兜底卡
+                  contentSeenRef.current = true;
+                  // 载荷二选一（任务 #116）：N=1 增量在 delta，N>1 补发正文在 content 字段，回退空串防 "undefined" 脏文本
+                  setContent((c) => c + contentChunkOf(event));
+                  break;
+                case "variant":
+                  // variant:start → running；variant:result 按 ok → ready/failed（任务 #62）
+                  setVariant((s) => reduceVariantEvent(s, event));
+                  break;
+                case "candidates":
+                  // 多候选生成事件（任务 #106）：start/progress/picked 聚合进状态机
+                  setCandidates((s) => reduceCandidatesEvent(s, event));
+                  break;
+                case "recipe":
+                  receivedRecipe = true;
+                  // 新结果真正到达后再解绑旧结果。请求失败时，旧配方及其保存/云端
+                  // 关联保持完整，避免页面显示旧配方却丢失其原始元数据。
+                  setClamped([]);
+                  setSavedAt(undefined);
+                  setLocalRecipeId(null);
+                  setCloudTableId(null);
+                  setTuningDiff(null);
+                  setAutoSavedNote("");
+                  setGenMeta(null);
+                  // recipe 事件可能携带 candidateScore（任务 #106）：同步进状态机
+                  setCandidates((s) => reduceCandidatesEvent(s, event));
+                  // 获胜载荷快照（任务 #111 O3；#114 互斥）：仅 N>1 且本次始终未收到 content 事件时兜底；
+                  // content 到达后走标准 splitSegments/RecipeJsonCard 路径，两卡不得同时出现
+                  setWinnerJson(
+                    shouldShowWinnerJson(Boolean(event.candidateScore), contentSeenRef.current)
+                      ? JSON.stringify(event.recipe)
+                      : "",
                   );
-                } else {
-                  if (event.summary) {
-                    const roundLabel = `第 ${(event.round ?? 0) + 1} 轮调研`;
-                    const block = `${roundLabel}\n${event.summary}`;
-                    if (!researchSummaryRef.current.includes(block)) {
-                      researchSummaryRef.current = [researchSummaryRef.current, block]
-                        .filter(Boolean)
-                        .join("\n\n");
+                  replaceActiveRecipe(event.recipe);
+                  // 结果真实到达后再收起输入；请求失败或流中断时输入始终留在眼前。
+                  setInputCollapsed(true);
+                  setClamped(event.clamped);
+                  // 原版快照落存：供对比卡 diff/切回（任务 #62）
+                  setOriginalRecipe(event.recipe);
+                  setOriginalClamped(event.clamped);
+                  // 方案解读（任务 #72）：缺失/空数组时置 undefined，卡片不渲染
+                  const rationale = event.brewRationale?.length ? event.brewRationale : undefined;
+                  setBrewRationale(rationale);
+                  setOriginalBrewRationale(rationale);
+                  setActiveVariant("original");
+                  // 生成元数据（任务 #35）：refUrls 来自 recipe 事件，豆原文/调研摘要取自本次请求与 research 聚合
+                  {
+                    const meta: GenMeta = {
+                      ...(event.refUrls?.length ? { refUrls: event.refUrls } : {}),
+                      ...(lastGenReqRef.current?.beans?.trim()
+                        ? { beanSnapshot: lastGenReqRef.current.beans.trim() }
+                        : {}),
+                      ...(researchSummaryRef.current
+                        ? { researchSummary: researchSummaryRef.current }
+                        : {}),
+                      ...(event.reviewFindings?.length
+                        ? { reviewFindings: event.reviewFindings }
+                        : {}),
+                      // 豆库关联落库（任务 #50/#130）：beanMatch 事件匹配的 beanId 优先（粘贴 AI 归类路径），
+                      // 回退到用户手选的 beanId（选豆库豆路径）——修复 AI 归类清空 beanId 后关联断裂根因
+                      ...((matchedBeanIdRef.current ?? lastGenReqRef.current?.beanId)
+                        ? { beanId: (matchedBeanIdRef.current ?? lastGenReqRef.current?.beanId)! }
+                        : {}),
+                      // 烘焙商参考方案原文（任务 #57）：照 beanSnapshot 写法，仅当非空时透传
+                      ...(lastGenReqRef.current?.roasterReference?.trim()
+                        ? { roasterReference: lastGenReqRef.current.roasterReference.trim() }
+                        : {}),
+                      // 方案解读（任务 #72）：照 reviewFindings 写法，仅当非空时透传
+                      ...(event.brewRationale?.length
+                        ? { brewRationale: event.brewRationale }
+                        : {}),
+                    };
+                    setGenMeta(Object.keys(meta).length > 0 ? meta : null);
+                  }
+                  // 反馈调参流程：展示 Diff + 自动保存为新版本（跳过手动保存引导）并回填追溯
+                  {
+                    const ctx = regenCtxRef.current;
+                    if (ctx) {
+                      regenCtxRef.current = null;
+                      const newRecipe = event.recipe;
+                      setTuningDiff({
+                        items: diffRecipes(ctx.base, newRecipe),
+                        changeNotes: event.changeNotes,
+                      });
+                      void (async () => {
+                        const name = `${ctx.base.name} · v${ctx.version}`;
+                        try {
+                          const res = await api.saveRecipe(newRecipe, {
+                            name,
+                            parentId: ctx.baseRecipeId,
+                            ...(ctx.feedbackId ? { sourceFeedbackId: ctx.feedbackId } : {}),
+                            ...(event.changeNotes ? { changeNotes: event.changeNotes } : {}),
+                            // 调研/豆信息快照同步落库（任务 #35）
+                            ...(event.refUrls?.length ? { refUrls: event.refUrls } : {}),
+                            ...(lastGenReqRef.current?.beans?.trim()
+                              ? { beanSnapshot: lastGenReqRef.current.beans.trim() }
+                              : {}),
+                            ...(researchSummaryRef.current
+                              ? { researchSummary: researchSummaryRef.current }
+                              : {}),
+                            // 审查遗留 findings 同步落库（任务 #36）
+                            ...(event.reviewFindings?.length
+                              ? { reviewFindings: event.reviewFindings }
+                              : {}),
+                            // 豆库关联落库（任务 #50/#130）：beanMatch 优先，回退到手选 beanId
+                            ...((matchedBeanIdRef.current ?? lastGenReqRef.current?.beanId)
+                              ? {
+                                  beanId: (matchedBeanIdRef.current ??
+                                    lastGenReqRef.current?.beanId)!,
+                                }
+                              : {}),
+                            // 烘焙商参考方案原文同步落库（任务 #57）
+                            ...(lastGenReqRef.current?.roasterReference?.trim()
+                              ? { roasterReference: lastGenReqRef.current.roasterReference.trim() }
+                              : {}),
+                            // 方案解读同步落库（任务 #72）
+                            ...(event.brewRationale?.length
+                              ? { brewRationale: event.brewRationale }
+                              : {}),
+                          });
+                          if (stale()) return;
+                          // 双保险回填：POST 时已自动回填，PATCH 兼容 feedbackId 晚到/丢失场景
+                          if (ctx.feedbackId) {
+                            await api
+                              .patchFeedbackResulting(ctx.baseRecipeId, ctx.feedbackId, res.id)
+                              .catch(() => undefined);
+                          }
+                          if (stale()) return;
+                          const v = res.version ?? ctx.version;
+                          setTuningDiff((d) => (d ? { ...d, version: v } : d));
+                          setSavedAt(Date.now()); // 已落库 → 跳过手动保存引导
+                          setLocalRecipeId(res.id);
+                          setAutoSavedNote(
+                            `已保存为第 ${v} 版「${name}」，可在冲煮历史中查看迭代链`,
+                          );
+                          setSaveRevision((r) => r + 1);
+                        } catch (e) {
+                          if (stale()) return;
+                          setStreamError(`调参版本自动保存失败：${(e as Error).message}`);
+                        }
+                      })();
                     }
                   }
-                  // 小红书登录失效（任务 #83）：顶栏徽标转警示态，不打断生成流程
-                  if (event.xhsLoginExpired) setXhsExpired(true);
-                  setResearch((r) => ({
-                    phase: "done",
-                    message:
-                      event.message ?? (event.ok ? "调研完成" : "未找到公开资料，基于知识库生成"),
-                    sources: [...r.sources, ...(event.sources ?? [])].filter(
-                      (source, index, all) =>
-                        all.findIndex((item) => item.url === source.url) === index,
-                    ),
-                    ok: event.ok ?? false,
-                    summary: event.summary,
-                    ...(event.round ? { round: event.round } : {}),
-                  }));
-                }
-                break;
-              case "reasoning":
-                // 带 variant:"improved" 的增量不并入主思考流，静默累计进对比卡缓冲（任务 #62）
-                if (event.variant === "improved") {
-                  setVariant((s) => reduceVariantEvent(s, event));
                   break;
-                }
-                setReasoning((r) => r + event.delta);
-                break;
-              case "review":
-                // 自动审查事件（任务 #36）：start → 审查中；findings → 首轮问题清单；fixed → 终结态
-                if (event.stage === "start") {
-                  setReview({ phase: "reviewing", findings: [], fixed: false });
-                } else if (event.stage === "findings") {
-                  setReview((r) => ({ ...r, preFindings: event.findings ?? [] }));
-                } else {
-                  setReview((r) => ({
-                    phase: "done",
-                    findings: event.findings ?? [],
-                    preFindings: event.preFindings ?? r.preFindings,
-                    fixed: event.fixed ?? false,
-                    dimensions: event.dimensions,
-                  }));
-                }
-                break;
-              case "content":
-                if (event.variant === "improved") {
-                  setVariant((s) => reduceVariantEvent(s, event));
+                case "error":
+                  failGeneration(event.message);
                   break;
-                }
-                // 标准渲染路径（任务 #114）：收到 content 即标记，recipe 事件不再捕获 winnerJson 兜底卡
-                contentSeenRef.current = true;
-                // 载荷二选一（任务 #116）：N=1 增量在 delta，N>1 补发正文在 content 字段，回退空串防 "undefined" 脏文本
-                setContent((c) => c + contentChunkOf(event));
-                break;
-              case "variant":
-                // variant:start → running；variant:result 按 ok → ready/failed（任务 #62）
-                setVariant((s) => reduceVariantEvent(s, event));
-                break;
-              case "candidates":
-                // 多候选生成事件（任务 #106）：start/progress/picked 聚合进状态机
-                setCandidates((s) => reduceCandidatesEvent(s, event));
-                break;
-              case "recipe":
-                receivedRecipe = true;
-                // 新结果真正到达后再解绑旧结果。请求失败时，旧配方及其保存/云端
-                // 关联保持完整，避免页面显示旧配方却丢失其原始元数据。
-                setClamped([]);
-                setSavedAt(undefined);
-                setLocalRecipeId(null);
-                setCloudTableId(null);
-                setTuningDiff(null);
-                setAutoSavedNote("");
-                setGenMeta(null);
-                // recipe 事件可能携带 candidateScore（任务 #106）：同步进状态机
-                setCandidates((s) => reduceCandidatesEvent(s, event));
-                // 获胜载荷快照（任务 #111 O3；#114 互斥）：仅 N>1 且本次始终未收到 content 事件时兜底；
-                // content 到达后走标准 splitSegments/RecipeJsonCard 路径，两卡不得同时出现
-                setWinnerJson(
-                  shouldShowWinnerJson(Boolean(event.candidateScore), contentSeenRef.current)
-                    ? JSON.stringify(event.recipe)
-                    : "",
-                );
-                replaceActiveRecipe(event.recipe);
-                // 结果真实到达后再收起输入；请求失败或流中断时输入始终留在眼前。
-                setInputCollapsed(true);
-                setClamped(event.clamped);
-                // 原版快照落存：供对比卡 diff/切回（任务 #62）
-                setOriginalRecipe(event.recipe);
-                setOriginalClamped(event.clamped);
-                // 方案解读（任务 #72）：缺失/空数组时置 undefined，卡片不渲染
-                const rationale = event.brewRationale?.length ? event.brewRationale : undefined;
-                setBrewRationale(rationale);
-                setOriginalBrewRationale(rationale);
-                setActiveVariant("original");
-                // 生成元数据（任务 #35）：refUrls 来自 recipe 事件，豆原文/调研摘要取自本次请求与 research 聚合
-                {
-                  const meta: GenMeta = {
-                    ...(event.refUrls?.length ? { refUrls: event.refUrls } : {}),
-                    ...(lastGenReqRef.current?.beans?.trim()
-                      ? { beanSnapshot: lastGenReqRef.current.beans.trim() }
-                      : {}),
-                    ...(researchSummaryRef.current
-                      ? { researchSummary: researchSummaryRef.current }
-                      : {}),
-                    ...(event.reviewFindings?.length
-                      ? { reviewFindings: event.reviewFindings }
-                      : {}),
-                    // 豆库关联落库（任务 #50/#130）：beanMatch 事件匹配的 beanId 优先（粘贴 AI 归类路径），
-                    // 回退到用户手选的 beanId（选豆库豆路径）——修复 AI 归类清空 beanId 后关联断裂根因
-                    ...((matchedBeanIdRef.current ?? lastGenReqRef.current?.beanId)
-                      ? { beanId: (matchedBeanIdRef.current ?? lastGenReqRef.current?.beanId)! }
-                      : {}),
-                    // 烘焙商参考方案原文（任务 #57）：照 beanSnapshot 写法，仅当非空时透传
-                    ...(lastGenReqRef.current?.roasterReference?.trim()
-                      ? { roasterReference: lastGenReqRef.current.roasterReference.trim() }
-                      : {}),
-                    // 方案解读（任务 #72）：照 reviewFindings 写法，仅当非空时透传
-                    ...(event.brewRationale?.length ? { brewRationale: event.brewRationale } : {}),
-                  };
-                  setGenMeta(Object.keys(meta).length > 0 ? meta : null);
-                }
-                // 反馈调参流程：展示 Diff + 自动保存为新版本（跳过手动保存引导）并回填追溯
-                {
-                  const ctx = regenCtxRef.current;
-                  if (ctx) {
-                    regenCtxRef.current = null;
-                    const newRecipe = event.recipe;
-                    setTuningDiff({
-                      items: diffRecipes(ctx.base, newRecipe),
-                      changeNotes: event.changeNotes,
-                    });
-                    void (async () => {
-                      const name = `${ctx.base.name} · v${ctx.version}`;
-                      try {
-                        const res = await api.saveRecipe(newRecipe, {
-                          name,
-                          parentId: ctx.baseRecipeId,
-                          ...(ctx.feedbackId ? { sourceFeedbackId: ctx.feedbackId } : {}),
-                          ...(event.changeNotes ? { changeNotes: event.changeNotes } : {}),
-                          // 调研/豆信息快照同步落库（任务 #35）
-                          ...(event.refUrls?.length ? { refUrls: event.refUrls } : {}),
-                          ...(lastGenReqRef.current?.beans?.trim()
-                            ? { beanSnapshot: lastGenReqRef.current.beans.trim() }
-                            : {}),
-                          ...(researchSummaryRef.current
-                            ? { researchSummary: researchSummaryRef.current }
-                            : {}),
-                          // 审查遗留 findings 同步落库（任务 #36）
-                          ...(event.reviewFindings?.length
-                            ? { reviewFindings: event.reviewFindings }
-                            : {}),
-                          // 豆库关联落库（任务 #50/#130）：beanMatch 优先，回退到手选 beanId
-                          ...((matchedBeanIdRef.current ?? lastGenReqRef.current?.beanId)
-                            ? {
-                                beanId: (matchedBeanIdRef.current ??
-                                  lastGenReqRef.current?.beanId)!,
-                              }
-                            : {}),
-                          // 烘焙商参考方案原文同步落库（任务 #57）
-                          ...(lastGenReqRef.current?.roasterReference?.trim()
-                            ? { roasterReference: lastGenReqRef.current.roasterReference.trim() }
-                            : {}),
-                          // 方案解读同步落库（任务 #72）
-                          ...(event.brewRationale?.length
-                            ? { brewRationale: event.brewRationale }
-                            : {}),
-                        });
-                        if (stale()) return;
-                        // 双保险回填：POST 时已自动回填，PATCH 兼容 feedbackId 晚到/丢失场景
-                        if (ctx.feedbackId) {
-                          await api
-                            .patchFeedbackResulting(ctx.baseRecipeId, ctx.feedbackId, res.id)
-                            .catch(() => undefined);
-                        }
-                        if (stale()) return;
-                        const v = res.version ?? ctx.version;
-                        setTuningDiff((d) => (d ? { ...d, version: v } : d));
-                        setSavedAt(Date.now()); // 已落库 → 跳过手动保存引导
-                        setLocalRecipeId(res.id);
-                        setAutoSavedNote(`已保存为第 ${v} 版「${name}」，可在冲煮历史中查看迭代链`);
-                        setSaveRevision((r) => r + 1);
-                      } catch (e) {
-                        if (stale()) return;
-                        setStreamError(`调参版本自动保存失败：${(e as Error).message}`);
-                      }
-                    })();
-                  }
-                }
-                break;
-              case "error":
-                failGeneration(event.message);
-                break;
-              case "done":
-                finishGeneration();
-                break;
-            }
+                case "done":
+                  finishGeneration();
+                  break;
+              }
+            },
+            onError: (message) => {
+              if (stale()) return;
+              failGeneration(message);
+            },
+            onDone: () => {
+              if (stale()) return;
+              finishGeneration();
+            },
           },
-          onError: (message) => {
-            if (stale()) return;
-            failGeneration(message);
-          },
-          onDone: () => {
-            if (stale()) return;
-            finishGeneration();
-          },
-        },
-        controller.signal,
-      );
+          controller.signal,
+        );
+      };
+      void runGeneration();
     },
     [invalidatePendingSave, replaceActiveRecipe],
   );
@@ -933,6 +990,9 @@ export default function App() {
         xhsExpired={xhsExpired}
         onClearXhsExpired={clearXhsExpired}
         onOpenSettings={() => setSettingsOpen(true)}
+        hosted={config?.deployment === "cloudflare"}
+        account={account}
+        onOpenAccount={() => setAccountOpen(true)}
         theme={theme}
         onToggleTheme={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
       />
@@ -1249,7 +1309,29 @@ export default function App() {
       )}
       {settingsOpen && (
         <Suspense fallback={<ModalLoading label="正在打开模型接口设置" />}>
-          <ApiSettingsModal open onClose={() => setSettingsOpen(false)} onApplied={refreshConfig} />
+          <ApiSettingsModal
+            open
+            onClose={() => setSettingsOpen(false)}
+            onApplied={async () => {
+              await refreshConfig();
+            }}
+          />
+        </Suspense>
+      )}
+      {accountOpen && config?.deployment === "cloudflare" && (
+        <Suspense fallback={<ModalLoading label="正在打开个人账号" />}>
+          <AccountModal
+            open
+            session={account}
+            onClose={() => setAccountOpen(false)}
+            onChanged={async (next) => {
+              setAccount(next);
+              const nextConfig = await refreshConfig();
+              refreshBeans();
+              void refreshHistory();
+              if (next.authenticated && !nextConfig?.modelConfigured) setSettingsOpen(true);
+            }}
+          />
         </Suspense>
       )}
       {feedbackEntry !== null && (

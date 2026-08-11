@@ -19,6 +19,7 @@ type LlmConfig = AppConfig["llm"];
 function fixture(): { file: string; defaults: LlmConfig; target: LlmConfig } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xbloom-llm-settings-"));
   const defaults: LlmConfig = {
+    provider: "openai-compatible",
     baseUrl: "https://env.example/v1",
     apiKey: "env-primary",
     fallbackApiKey: "env-fallback",
@@ -105,6 +106,30 @@ describe("本机模型接口设置", () => {
       defaults,
     );
     assert.equal(target.baseUrl, "https://other.example/v1");
+  });
+
+  it("切换连接并提交新主 Key 时不复用旧兜底 Key", async () => {
+    const { file, defaults, target } = fixture();
+    await updateLlmSettings(
+      { apiKey: "old-primary", fallbackApiKey: "old-fallback", model: "model-a" },
+      file,
+      target,
+      defaults,
+    );
+    await updateLlmSettings(
+      {
+        provider: "anthropic",
+        baseUrl: "https://api.anthropic.com/v1",
+        apiKey: "new-primary",
+        model: "claude-model",
+      },
+      file,
+      target,
+      defaults,
+    );
+    assert.equal(target.apiKey, "new-primary");
+    assert.equal(target.fallbackApiKey, "new-primary");
+    assert.equal(readStoredLlmSettings(file)?.fallbackApiKey, "new-primary");
   });
 
   it("运行期读取与写入共用队列，读取结果和即时配置保持一致", async () => {

@@ -28,6 +28,20 @@ function Relative-Path([string]$Path) {
     return $Path.Substring($Root.Length).TrimStart('\').Replace('\', '/')
 }
 
+function Get-FileSha256([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '')
+        } finally {
+            $sha256.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Get-ReleaseManifestSha256([string]$ManifestPath) {
     # Keep this release gate compatible with the minimal Windows PowerShell
     # environments used by GitHub runners and older one-click-install hosts.
@@ -79,7 +93,7 @@ foreach ($file in $files) {
     $relative = Relative-Path $file
     if ($relative -ieq 'tools/xhs-mcp/bundled/xiaohongshu-mcp-windows-amd64-fixed.exe') {
         $expectedHash = Get-ReleaseManifestSha256 (Join-Path $Root 'tools\xhs-mcp\xhs-mcp-release.psd1')
-        $actualHash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToUpperInvariant()
+        $actualHash = Get-FileSha256 $file
         if ($actualHash -ne $expectedHash) {
             $problems.Add("checksum mismatch for bundled MCP executable: $relative")
         }

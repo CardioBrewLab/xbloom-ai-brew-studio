@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc && node -e \"const fs=require('node:fs');fs.cpSync('src/prompts','dist/prompts',{recursive:true});fs.cpSync('src/knowledge','dist/knowledge',{recursive:true});console.log('[build] prompts/knowledge copied to dist')\"",
-    "test": "tsx --test \"test/*.test.ts\""
+    "test": "tsx --test --test-concurrency=4 \"test/*.test.ts\""
   },
   "dependencies": {
     "@xbloom/shared": "*",

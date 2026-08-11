@@ -13,7 +13,12 @@ import {
 import type { LlmSettingsUpdateInput } from "./llm-settings.js";
 import type { GenerationMode } from "./generation-mode.js";
 import type { XhsQrFailureKind } from "./xhs-qr.js";
-import { companionConfig, companionFetch, hostedPage } from "./companion.js";
+import {
+  backendConnectionErrorMessage,
+  companionConfig,
+  companionFetch,
+  hostedPage,
+} from "./companion.js";
 
 // ---------------------------------------------------------------------------
 // 契约类型
@@ -109,6 +114,8 @@ export interface CloudStatus {
   loggedIn: boolean;
   proxyUsed: boolean;
   message: string;
+  /** 云端版需要先登录工作台账号，才能按用户隔离保存 xBloom 凭据。 */
+  workspaceLoginRequired?: boolean;
   /** 后端 .env 配置了凭据，具备自动登录能力 */
   autoLogin?: boolean;
   /** 当前登录账号邮箱（已登录时返回） */
@@ -523,7 +530,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if ((isXhsQr || isXhsPoll) && (e as Error)?.name === "TimeoutError") {
       throw new ApiRequestError("小红书登录窗口响应超时，请稍后重试", "browser_timeout");
     }
-    throw new Error("无法连接后端服务，请确认 server 已启动（npm run dev）");
+    throw new Error(backendConnectionErrorMessage(location.hostname));
   }
   if (!res.ok) {
     let msg = `请求失败（HTTP ${res.status}）`;

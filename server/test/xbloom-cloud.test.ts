@@ -464,9 +464,14 @@ describe("自动登录：ensureSession / withSessionRetry / 鉴权失效识别",
     assert.equal(stored.version, 2);
     assert.equal(stored.algorithm, "windows-dpapi");
     assert.equal(typeof stored.ciphertext, "string");
+    assert.equal(Object.hasOwn(stored, "token"), false);
+    assert.equal(Object.hasOwn(stored, "email"), false);
+    assert.equal(Object.hasOwn(stored, "memberId"), false);
     assert.equal(raw.includes(fakeSession.token), false);
     assert.equal(raw.includes(fakeSession.email), false);
-    assert.equal(raw.includes(String(fakeSession.memberId)), false);
+    // A short numeric ID can occur by chance inside randomized Base64 ciphertext.
+    // Check for the plaintext JSON field instead of an unrelated digit substring.
+    assert.equal(raw.includes(`"memberId":${fakeSession.memberId}`), false);
   });
 
   it("历史明文会话兼容读取后原位升级为 DPAPI 密文", () => {

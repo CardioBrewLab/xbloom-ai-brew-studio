@@ -12,7 +12,10 @@ function Get-CandidateFiles {
             # Inspect both the index and every non-ignored untracked file. This
             # makes the gate effective before the first commit and before a new
             # release artifact is staged.
-            return @(& git -C $Root ls-files --cached --others --exclude-standard | Sort-Object -Unique | ForEach-Object { Join-Path $Root $_ })
+            return @(& git -C $Root ls-files --cached --others --exclude-standard |
+                Sort-Object -Unique |
+                ForEach-Object { Join-Path $Root $_ } |
+                Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
         }
     }
 
@@ -126,6 +129,8 @@ $secretPatterns = [ordered]@{
     'npm access token' = 'npm_[A-Za-z0-9]{36}'
     'GitLab access token' = 'glpat-[A-Za-z0-9_-]{20,}'
     'Stripe live secret' = 'sk_live_[0-9A-Za-z]{16,}'
+    'mainland China mobile number' = '(?<!\d)1[3-9]\d{9}(?!\d)'
+    'numeric GitHub account URL' = 'github\.com/\d{8,}(?:[/?#)]|$)'
     'URL with embedded credentials' = 'https?://[^/\s:@]+:[^@\s/]+@'
     'absolute Windows user path' = '[A-Za-z]:[\\/]Users[\\/][^\s"''`]+'
 }

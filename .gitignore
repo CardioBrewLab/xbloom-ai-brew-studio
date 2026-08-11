@@ -41,3 +41,7 @@ tools/xhs-mcp/browser-data/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Tencent Cloud EdgeOne
+.edgeone/
+.tef_dist/

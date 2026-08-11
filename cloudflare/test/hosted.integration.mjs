@@ -224,7 +224,7 @@ try {
 
   const status = await request("/api/status", { requestOrigin: null });
   assert.equal(status.response.status, 200);
-  assert.equal(status.payload.version, "hosted-0.2");
+  assert.equal(status.payload.version, "hosted-0.2.1");
   assert.equal(status.payload.capabilities.auth, true);
 
   const crossSite = await request("/api/beans", {
@@ -241,14 +241,34 @@ try {
     headers: {
       "x-xbloom-proxy-secret": proxySecret,
       "x-xbloom-client-ip": "198.51.100.9",
+      "x-forwarded-host": "brew.example.cn",
+      "x-forwarded-proto": "https",
     },
   });
   assert.equal(trustedProxy.response.status, 200);
+
+  const forgedTrustedProxy = await request("/api/beans", {
+    method: "POST",
+    body: { name: "forged-trusted-edge" },
+    requestOrigin: "https://attacker.example",
+    headers: {
+      "x-xbloom-proxy-secret": proxySecret,
+      "x-xbloom-client-ip": "198.51.100.9",
+      "x-forwarded-host": "brew.example.cn",
+      "x-forwarded-proto": "https",
+    },
+  });
+  assert.equal(forgedTrustedProxy.response.status, 403);
 
   const guestSettings = await request("/api/settings/llm", { requestOrigin: null });
   assert.equal(guestSettings.payload.settings.source, "unconfigured");
   const guestSave = await request("/api/settings/llm", { method: "PUT", body: {} });
   assert.equal(guestSave.response.status, 401);
+
+  const guestCloudStatus = await request("/api/cloud/status", { requestOrigin: null });
+  assert.equal(guestCloudStatus.response.status, 200);
+  assert.equal(guestCloudStatus.payload.loggedIn, false);
+  assert.equal(guestCloudStatus.payload.workspaceLoginRequired, true);
 
   const user1 = new CookieJar();
   const password1 = "correct-horse-1";

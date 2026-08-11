@@ -1,5 +1,18 @@
 # 变更记录
 
+## 0.2.1 — 2026-08-11
+
+### 修复
+
+- Windows PowerShell 5.1 安装链改用内置 .NET 完成 SHA-256、受限 PSD1 读取和 ZIP 解压，修复部分全新 Windows 主机的 `Expand-Archive` 失败。
+- EdgeOne API 入口改为 Node.js Cloud Function，并增加 Cloudflare Pages Relay，避免直连 `workers.dev` 时出现 504 或出站网络失败。
+- Hosted 页面断开云端时不再提示运行本机 `npm run dev`，并每 10 秒自动重试；本地版仍保留准确的启动指引。
+- 公开部署默认严格使用用户自己的 BYOK；部署者共享模型保持未启用状态。
+
+### 验证
+
+- Windows 兼容辅助函数、源码干净安装、EdgeOne Relay、Pages Relay、Hosted 多用户隔离和全量 `npm run verify` 纳入发布门禁。
+
 ## 0.2.0 — 2026-08-11
 
 ### 新增

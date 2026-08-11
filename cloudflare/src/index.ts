@@ -48,7 +48,20 @@ function constantTimeTextEqual(left: string, right: string): boolean {
 function trustedEdgeProxy(request: Request, env: Env): boolean {
   const expected = env.EDGE_PROXY_SECRET?.trim() ?? "";
   const supplied = request.headers.get("x-xbloom-proxy-secret")?.trim() ?? "";
-  return expected.length >= 32 && constantTimeTextEqual(supplied, expected);
+  if (expected.length < 32 || !constantTimeTextEqual(supplied, expected)) return false;
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return true;
+
+  const forwardedHost = request.headers.get("x-forwarded-host")?.trim() ?? "";
+  const forwardedProto = request.headers.get("x-forwarded-proto")?.trim().toLowerCase() ?? "";
+  const origin = request.headers.get("origin")?.trim() ?? "";
+  if (!forwardedHost || forwardedProto !== "https" || !origin) return false;
+  try {
+    const forwardedOrigin = new URL(`https://${forwardedHost}`);
+    if (forwardedOrigin.host !== forwardedHost.toLowerCase()) return false;
+    return origin === forwardedOrigin.origin;
+  } catch {
+    return false;
+  }
 }
 
 async function requestBody(request: Request): Promise<Record<string, unknown>> {
@@ -599,7 +612,7 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
   if (request.method === "GET" && path === "/api/status")
     return json({
       ok: true,
-      version: "hosted-0.2",
+      version: "hosted-0.2.1",
       deployment: "cloudflare",
       capabilities: { generate: true, cloud: true, ble: false, auth: true, personalModel: true },
     });

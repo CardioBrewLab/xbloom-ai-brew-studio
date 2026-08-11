@@ -6,16 +6,11 @@ import { after, before, describe, it } from "node:test";
 import express from "express";
 import { config } from "../src/config.js";
 import settingsRouter, { isLoopbackHostname } from "../src/routes/settings.js";
+import { shutdownHttpServer } from "./helpers/http-server.js";
 
 let appServer: http.Server;
 let appPort = 0;
 const originalLlmConfig = { ...config.llm };
-
-function shutdown(server: http.Server | undefined): void {
-  if (!server) return;
-  server.closeAllConnections?.();
-  server.close();
-}
 
 async function startMockLlm(status = 200): Promise<{
   server: http.Server;
@@ -71,9 +66,9 @@ before(async () => {
   appPort = (appServer.address() as AddressInfo).port;
 });
 
-after(() => {
+after(async () => {
   Object.assign(config.llm, originalLlmConfig);
-  shutdown(appServer);
+  await shutdownHttpServer(appServer);
 });
 
 describe("POST /api/settings/llm/test", () => {
@@ -111,7 +106,7 @@ describe("POST /api/settings/llm/test", () => {
       assert.equal(mock.requests[0]?.body.model, "fixture-model");
       assert.equal(mock.requests[0]?.body.stream, false);
     } finally {
-      shutdown(mock.server);
+      await shutdownHttpServer(mock.server);
     }
   });
 
@@ -134,7 +129,7 @@ describe("POST /api/settings/llm/test", () => {
       assert.equal(result.text.includes("UPSTREAM_SECRET_DIAGNOSTIC"), false);
       assert.equal(result.text.includes("fixture-secret-key"), false);
     } finally {
-      shutdown(mock.server);
+      await shutdownHttpServer(mock.server);
     }
   });
 });

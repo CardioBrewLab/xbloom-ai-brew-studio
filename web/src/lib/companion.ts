@@ -15,8 +15,20 @@ export interface CompanionResearch {
   xhsLoginExpired?: boolean;
 }
 
+const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1"]);
+
+export function isHostedHostname(hostname: string): boolean {
+  return !LOCAL_HOSTNAMES.has(hostname.toLowerCase());
+}
+
 export function hostedPage(): boolean {
-  return !["localhost", "127.0.0.1", "::1"].includes(location.hostname);
+  return isHostedHostname(location.hostname);
+}
+
+export function backendConnectionErrorMessage(hostname: string): string {
+  return isHostedHostname(hostname)
+    ? "云端服务暂时未连通，请稍后重试"
+    : "无法连接后端服务，请确认 server 已启动（npm run dev）";
 }
 
 export function companionConfig(): CompanionConfig | null {

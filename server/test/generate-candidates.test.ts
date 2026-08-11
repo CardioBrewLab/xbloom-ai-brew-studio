@@ -16,6 +16,7 @@ import express from "express";
 import { candidateRecipeDifferenceCount, generateRouter } from "../src/routes/generate.js";
 import { config } from "../src/config.js";
 import type { Recipe } from "../src/lib/recipe-schema.js";
+import { shutdownHttpServer } from "./helpers/http-server.js";
 
 // ---------------------------------------------------------------------------
 // mock LLM：按请求到达顺序消费响应队列；stream:true 回 SSE，否则回一次性 JSON
@@ -196,25 +197,17 @@ before(async () => {
   appPort = (appServer.address() as AddressInfo).port;
 });
 
-/** 关闭 server 并强制断开 keep-alive 连接（否则 close() 挂住事件循环，node:test 子进程不退出） */
-function shutdown(server: http.Server | undefined | null) {
-  if (!server) return;
-  server.close();
-  server.closeAllConnections?.();
-}
-
 after(async () => {
   config.llm.baseUrl = saved.baseUrl;
   config.llm.fallbackModel = saved.fallbackModel;
   config.llm.thirdModel = saved.thirdModel;
   config.generateCandidates = saved.candidates;
-  shutdown(appServer);
-  shutdown(mock?.server);
+  await Promise.all([shutdownHttpServer(appServer), shutdownHttpServer(mock?.server)]);
 });
 
 /** 启动一个新 mock LLM 并把 config 指向它（单跳模型链，避免兜底干扰） */
 async function useMockLlm(queue: QueuedResponse[]): Promise<Array<Record<string, unknown>>> {
-  shutdown(mock?.server);
+  await shutdownHttpServer(mock?.server);
   mock = startMockLlm(queue);
   mock.server.listen(0, "127.0.0.1");
   await once(mock.server, "listening");

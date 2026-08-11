@@ -15,6 +15,8 @@ export interface PublishPanelProps {
   onCloudChanged: () => void;
   /** 打开发布预览弹窗 */
   onOpenPreview: () => void;
+  /** 云端版尚未登录工作台时，打开账号弹窗。 */
+  onOpenWorkspaceAccount?: () => void;
   /** 当前配方绑定的云端 tableId（任务 #118）：会话态随切换历史/新生成清空（任务 #115），
       存在即表示当前配方已发布/来源于云端，后续发布走更新链路 */
   cloudTableId?: string;
@@ -25,6 +27,7 @@ export default function PublishPanel({
   cloud,
   onCloudChanged,
   onOpenPreview,
+  onOpenWorkspaceAccount,
   cloudTableId,
 }: PublishPanelProps) {
   const [email, setEmail] = useState("");
@@ -60,6 +63,7 @@ export default function PublishPanel({
 
   const loggedIn = cloud?.loggedIn ?? false;
   const reachable = cloud?.reachable ?? false;
+  const workspaceLoginRequired = cloud?.workspaceLoginRequired ?? false;
 
   return (
     <Card>
@@ -73,18 +77,30 @@ export default function PublishPanel({
               tone={!cloud ? "off" : loggedIn ? "ok" : reachable ? "warn" : "bad"}
               pulse={loggedIn}
             />
-            {!cloud ? "离线" : loggedIn ? "已登录" : reachable ? "未登录" : "不可达"}
+            {!cloud
+              ? "检测中"
+              : loggedIn
+                ? "已登录"
+                : workspaceLoginRequired
+                  ? "先登录工作台"
+                  : reachable
+                    ? "未登录"
+                    : "不可达"}
           </span>
         }
       />
       <div className="space-y-4 p-5">
-        {cloud && !cloud.reachable && (
+        {cloud && (!cloud.reachable || workspaceLoginRequired) && (
           <p className="flex h-11 items-center rounded-lg border border-[var(--line)] bg-[var(--bg-inset)] px-3.5 text-xs text-[var(--tx-2)]">
             <span className="truncate">{cloud.message || "xBloom 官方云端暂时不可用"}</span>
           </p>
         )}
 
-        {!loggedIn ? (
+        {workspaceLoginRequired ? (
+          <button type="button" onClick={onOpenWorkspaceAccount} className={`${btnPrimary} w-full`}>
+            登录工作台后连接 xBloom
+          </button>
+        ) : !loggedIn ? (
           <div className="space-y-3">
             <Field label="xBloom 账号邮箱">
               <input

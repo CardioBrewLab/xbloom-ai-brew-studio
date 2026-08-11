@@ -12,7 +12,7 @@
 
 - 模型 Key 由设置页保存时使用 Windows DPAPI 绑定当前用户。
 - xBloom 云端密码不写入本地会话文件；会话 Token 使用 Windows DPAPI 绑定当前用户后写入已忽略的 `data/session.json`。
-- 小红书会话保存在已忽略的 `tools/xhs-mcp/runtime/cookies.json`，运行目录使用仅当前用户、SYSTEM 与管理员可访问的 ACL。
+- 小红书会话保存在已忽略的 `tools/xhs-mcp/runtime/cookies.json`。NTFS/ReFS 会把运行目录收紧为仅当前用户、SYSTEM 与管理员可访问；exFAT/FAT 不提供文件 ACL，应把整个项目目录放在当前 Windows 用户独占的位置。
 - 服务默认仅监听本机回环地址。
 
 提交前运行 `npm run check:release`，并在 GitHub 仓库设置中开启 Secret scanning 与 Push protection。

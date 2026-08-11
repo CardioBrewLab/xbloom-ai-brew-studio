@@ -1,9 +1,13 @@
 #requires -Version 5.1
 # Starts the pinned Windows-fixed xiaohongshu-mcp binary in the background.
+[CmdletBinding()]
+param([switch]$PrepareOnly)
+
 $ErrorActionPreference = "Stop"
 $Directory = [IO.Path]::GetFullPath($PSScriptRoot)
 $Executable = Join-Path $Directory "xiaohongshu-mcp.exe"
-$Release = Import-PowerShellDataFile -LiteralPath (Join-Path $Directory 'xhs-mcp-release.psd1')
+. (Join-Path $Directory '..\..\scripts\windows-compat.ps1')
+$Release = Import-XbloomFlatPsd1 (Join-Path $Directory 'xhs-mcp-release.psd1')
 $ExpectedSha256 = ([string]$Release.Sha256).ToUpperInvariant()
 $RuntimeDirectory = Join-Path $Directory 'runtime'
 $CookiesFile = Join-Path $RuntimeDirectory "cookies.json"
@@ -31,6 +35,19 @@ function Protect-PrivateRuntimeDirectory([string]$Path) {
     foreach ($privateFile in @($CookiesFile, $LogOut, $LogErr)) {
         Assert-NotReparsePoint $privateFile
     }
+
+    try {
+        $driveFormat = ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($Path))).DriveFormat
+    } catch {
+        $driveFormat = 'Unknown'
+    }
+    if ($driveFormat -notin @('NTFS', 'ReFS')) {
+        # exFAT/FAT do not implement Windows file DACLs. Keep the path free of
+        # reparse points and continue so the optional assistant remains usable.
+        Write-Warning "The $driveFormat volume does not support per-user ACLs; keep this project directory private to the current Windows user."
+        return
+    }
+
     $directoryInfo = Get-Item -LiteralPath $Path -Force
     # Request and write the DACL only. Reusing Set-Acl's broader descriptor on
     # an already-protected directory can ask for SeSecurityPrivilege on a
@@ -78,7 +95,7 @@ function Test-OwnedExecutablePath($Process) {
 function Test-VerifiedExecutable {
     if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) { return $false }
     try {
-        $actual = (Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash.ToUpperInvariant()
+        $actual = (Get-XbloomSha256 $Executable).ToUpperInvariant()
         return $actual -eq $ExpectedSha256
     } catch {
         return $false
@@ -87,6 +104,11 @@ function Test-VerifiedExecutable {
 
 Protect-PrivateRuntimeDirectory $RuntimeDirectory
 Assert-NotReparsePoint $Executable
+
+if ($PrepareOnly) {
+    Write-Host "Xiaohongshu MCP runtime directory prepared: $RuntimeDirectory"
+    exit 0
+}
 
 if (-not (Test-VerifiedExecutable)) {
     $runningFromPath = @(Get-CimInstance Win32_Process -Filter "Name='xiaohongshu-mcp.exe'" -ErrorAction SilentlyContinue |

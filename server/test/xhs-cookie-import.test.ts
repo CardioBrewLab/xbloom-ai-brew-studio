@@ -21,6 +21,7 @@ import {
   xhsCookiesFilePath,
   XHS_COOKIE_IMPORT_TTL_DAYS,
 } from "../src/lib/xhs-cookie-import.js";
+import { shutdownHttpServer } from "./helpers/http-server.js";
 
 const BASE = "http://127.0.0.1:18060";
 const realFetch = globalThis.fetch;
@@ -195,10 +196,10 @@ describe("/api/xhs/login/cookie-import 路由", () => {
     });
   });
 
-  after(() => {
+  after(async () => {
     globalThis.fetch = realFetch;
     delete process.env.XHS_COOKIES_PATH;
-    server?.close();
+    await shutdownHttpServer(server);
   });
 
   const post = (cookie: string) =>

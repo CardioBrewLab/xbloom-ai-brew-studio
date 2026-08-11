@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, beforeEach, describe, test } from "node:test";
-import { onRequest } from "../edge-functions/api/[[default]].js";
+import edgeOneHandler, { onRequest } from "../cloud-functions/api/[[default]].js";
 
 const originalFetch = globalThis.fetch;
 
@@ -19,6 +19,10 @@ after(() => {
 });
 
 describe("EdgeOne 中国入口 API Relay", () => {
+  test("默认导出与可测试的命名处理器保持一致", () => {
+    assert.equal(edgeOneHandler, onRequest);
+  });
+
   test("缺失或带凭据的后端配置返回 503", async () => {
     const missing = await onRequest({
       request: edgeRequest("https://brew.example.cn/api/status"),
@@ -57,6 +61,7 @@ describe("EdgeOne 中国入口 API Relay", () => {
           method: "POST",
           headers: {
             "content-type": "application/json",
+            origin: "https://brew.example.cn",
             "x-xbloom-proxy-secret": "attacker-value",
             "x-xbloom-client-ip": "attacker-ip",
             "cf-connecting-ip": "attacker-cf-ip",
@@ -65,6 +70,7 @@ describe("EdgeOne 中国入口 API Relay", () => {
         },
         "198.51.100.23",
       ),
+      clientIp: "198.51.100.23",
       env: {
         CLOUDFLARE_WORKER_ORIGIN: "https://worker.example/",
         EDGE_PROXY_SECRET: "s".repeat(48),
@@ -74,6 +80,7 @@ describe("EdgeOne 中国入口 API Relay", () => {
     assert.equal(captured.target, "https://worker.example/api/generate?mode=max");
     assert.equal(captured.init.method, "POST");
     assert.equal(captured.init.redirect, "manual");
+    assert.equal(captured.init.duplex, "half");
     assert.equal(captured.init.headers.get("x-xbloom-proxy-secret"), "s".repeat(48));
     assert.equal(captured.init.headers.get("x-xbloom-client-ip"), "198.51.100.23");
     assert.equal(captured.init.headers.get("cf-connecting-ip"), null);
@@ -86,6 +93,31 @@ describe("EdgeOne 中国入口 API Relay", () => {
     assert.equal(response.headers.get("x-xbloom-edge"), "edgeone");
     assert.match(response.headers.get("set-cookie") ?? "", /xbloom_auth=session/);
     assert.match(await response.text(), /done/);
+  });
+
+  test("跨站或缺少 Origin 的写请求不会获得可信代理豁免", async () => {
+    let forwarded = false;
+    globalThis.fetch = async () => {
+      forwarded = true;
+      return new Response(null, { status: 204 });
+    };
+    const env = {
+      CLOUDFLARE_WORKER_ORIGIN: "https://worker.example/",
+      EDGE_PROXY_SECRET: "s".repeat(48),
+    };
+    for (const origin of ["https://attacker.example", null]) {
+      const headers = origin ? { origin } : {};
+      const response = await onRequest({
+        request: edgeRequest("https://brew.example.cn/api/beans", {
+          method: "POST",
+          headers,
+          body: "{}",
+        }),
+        env,
+      });
+      assert.equal(response.status, 403);
+    }
+    assert.equal(forwarded, false);
   });
 
   test("GET 与 HEAD 不附带正文，缺少边缘 IP 时使用 unknown", async () => {
@@ -105,5 +137,24 @@ describe("EdgeOne 中国入口 API Relay", () => {
       });
       assert.equal(response.status, 204);
     }
+  });
+
+  test("上游网络异常返回稳定的 JSON 502，而不是平台运行时错误", async () => {
+    globalThis.fetch = async () => {
+      throw new Error("simulated network failure");
+    };
+    const response = await onRequest({
+      request: edgeRequest("https://brew.example.cn/api/status"),
+      env: {
+        CLOUDFLARE_WORKER_ORIGIN: "https://worker.example/",
+        EDGE_PROXY_SECRET: "e".repeat(32),
+      },
+    });
+    assert.equal(response.status, 502);
+    assert.match(response.headers.get("content-type") ?? "", /application\/json/);
+    assert.deepEqual(await response.json(), {
+      ok: false,
+      message: "云端后端连接暂时不可用",
+    });
   });
 });

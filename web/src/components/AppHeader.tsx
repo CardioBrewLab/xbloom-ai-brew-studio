@@ -139,7 +139,15 @@ export default function AppHeader({
                 pulse={cloud?.loggedIn ?? false}
               />
               xBloom{" "}
-              {!cloud ? "检测中" : cloud.loggedIn ? "已登录" : cloud.reachable ? "待登录" : "离线"}
+              {!cloud
+                ? "检测中"
+                : cloud.loggedIn
+                  ? "已登录"
+                  : cloud.workspaceLoginRequired
+                    ? "先登录工作台"
+                    : cloud.reachable
+                      ? "待登录"
+                      : "离线"}
             </span>
           </span>
           <span className="hidden md:block">

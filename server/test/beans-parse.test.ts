@@ -15,6 +15,7 @@ import type { AddressInfo } from "node:net";
 import express from "express";
 import { beansRouter, normalizeRoastLevel, sanitizeParsedBean } from "../src/routes/beans.js";
 import { config } from "../src/config.js";
+import { shutdownHttpServer } from "./helpers/http-server.js";
 
 // ---------------------------------------------------------------------------
 // mock LLM：按序消费响应队列；stream:false 回一次性 JSON
@@ -52,12 +53,6 @@ let mock: { server: http.Server; requests: Array<Record<string, unknown>> } | nu
 
 const saved = { baseUrl: "", fallbackModel: "", thirdModel: "" };
 
-function shutdown(server: http.Server | undefined | null) {
-  if (!server) return;
-  server.close();
-  server.closeAllConnections?.();
-}
-
 before(async () => {
   saved.baseUrl = config.llm.baseUrl;
   saved.fallbackModel = config.llm.fallbackModel;
@@ -75,13 +70,12 @@ after(async () => {
   config.llm.baseUrl = saved.baseUrl;
   config.llm.fallbackModel = saved.fallbackModel;
   config.llm.thirdModel = saved.thirdModel;
-  shutdown(appServer);
-  shutdown(mock?.server);
+  await Promise.all([shutdownHttpServer(appServer), shutdownHttpServer(mock?.server)]);
 });
 
 /** 启动一个新 mock LLM 并把 config 指向它（单跳模型链，避免兜底干扰） */
 async function useMockLlm(queue: QueuedResponse[]): Promise<Array<Record<string, unknown>>> {
-  shutdown(mock?.server);
+  await shutdownHttpServer(mock?.server);
   mock = startMockLlm(queue);
   mock.server.listen(0, "127.0.0.1");
   await once(mock.server, "listening");

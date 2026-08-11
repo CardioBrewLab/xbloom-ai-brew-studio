@@ -1,6 +1,6 @@
 {
   "name": "xbloom-ai-brew-studio",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "xBloom AI 冲煮工作台 —— LLM 配方生成 / 云端同步 / BLE 实验",
   "license": "MIT",
@@ -22,11 +22,13 @@
     "test": "npm run build:shared && npm run test --workspace server",
     "test:web": "npm run build:shared && npm run test --workspace web",
     "test:edgeone": "node --test scripts/test-edgeone-proxy.mjs",
+    "test:relay": "npm --prefix cloudflare-pages-relay test",
+    "test:hosting": "npm run test:edgeone && npm run test:relay",
     "test:all": "npm run build:shared && npm run test --workspace server && npm run test --workspace web",
     "test:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-clean-install.ps1",
     "check:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-release-safety.ps1",
     "verify:cloudflare": "npm ci --prefix cloudflare && npm --prefix cloudflare test && npm --prefix cloudflare run test:integration && npm --prefix cloudflare run check",
-    "verify": "npm run format:check && npm run check:release && npm run test:all && npm run test:edgeone && npm run build && npm run verify:cloudflare",
+    "verify": "npm run format:check && npm run check:release && npm run test:all && npm run test:hosting && npm run build && npm run verify:cloudflare",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },

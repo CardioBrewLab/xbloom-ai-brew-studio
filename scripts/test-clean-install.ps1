@@ -12,6 +12,7 @@ $ProgressPreference = 'SilentlyContinue'
 $SourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $ReportDirectory = Join-Path $SourceRoot '.codex'
 $ReportPath = Join-Path $ReportDirectory 'clean-install-report.json'
+. (Join-Path $PSScriptRoot 'windows-compat.ps1')
 $serverProcess = $null
 $result = [ordered]@{
     startedAt = (Get-Date).ToUniversalTime().ToString('o')
@@ -119,7 +120,7 @@ try {
     if ($ArtifactPath) {
         $archive = [IO.Path]::GetFullPath($ArtifactPath)
         Assert-Condition (Test-Path -LiteralPath $archive -PathType Leaf) "Release archive does not exist: $archive"
-        Expand-Archive -LiteralPath $archive -DestinationPath $WorkRoot -Force
+        Expand-XbloomZipArchive $archive $WorkRoot
         $InstallRoot = Resolve-ExtractedRoot $WorkRoot
     } else {
         $InstallRoot = Join-Path $WorkRoot 'xBloom AI Brew Studio fresh install'
@@ -155,11 +156,13 @@ try {
     }
     $result.build = $true
 
-    $manifest = Import-PowerShellDataFile -LiteralPath (Join-Path $InstallRoot 'tools\xhs-mcp\xhs-mcp-release.psd1')
+    $manifest = Import-XbloomFlatPsd1 (Join-Path $InstallRoot 'tools\xhs-mcp\xhs-mcp-release.psd1')
     $xhsExe = Join-Path $InstallRoot 'tools\xhs-mcp\xiaohongshu-mcp.exe'
     Assert-Condition (Test-Path -LiteralPath $xhsExe -PathType Leaf) 'The checksum-pinned Xiaohongshu MCP executable was not installed.'
-    $xhsHash = (Get-FileHash -LiteralPath $xhsExe -Algorithm SHA256).Hash.ToUpperInvariant()
+    $xhsHash = (Get-XbloomSha256 $xhsExe).ToUpperInvariant()
     Assert-Condition ($xhsHash -eq ([string]$manifest.Sha256).ToUpperInvariant()) 'The installed Xiaohongshu MCP checksum differs from the release manifest.'
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $InstallRoot 'tools\xhs-mcp\start-xhs-mcp.ps1') -PrepareOnly
+    if ($LASTEXITCODE -ne 0) { throw "Preparing the Xiaohongshu MCP runtime exited with code $LASTEXITCODE" }
     $result.xhsBinary = $true
 
     $envPath = Join-Path $InstallRoot '.env'

@@ -17,6 +17,7 @@ $NodeVersion = '24.18.0'
 $NodeArchiveName = "node-v$NodeVersion-win-x64.zip"
 $NodeArchiveUrl = "https://nodejs.org/dist/v$NodeVersion/$NodeArchiveName"
 $ExpectedNodeSha256 = '0AE68406B42D7725661DA979B1403EC9926DA205C6770827F33AAC9D8F26E821'
+. (Join-Path $PSScriptRoot 'windows-compat.ps1')
 
 function Assert-ProjectPath([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
@@ -64,7 +65,7 @@ function Install-PortableNode {
     $archive = Join-Path $RuntimeRoot $NodeArchiveName
     Download-File $NodeArchiveUrl $archive
 
-    $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToUpperInvariant()
+    $actualHash = (Get-XbloomSha256 $archive).ToUpperInvariant()
     if ($actualHash -ne $ExpectedNodeSha256) { throw "Node.js download checksum mismatch." }
 
     $extractRoot = Assert-NoProjectReparsePoint (Join-Path $RuntimeRoot 'node-extract')
@@ -72,7 +73,7 @@ function Install-PortableNode {
         Remove-Item -LiteralPath (Assert-NoProjectReparsePoint $extractRoot) -Recurse -Force
     }
     New-Item -ItemType Directory -Path $extractRoot | Out-Null
-    Expand-Archive -LiteralPath $archive -DestinationPath $extractRoot -Force
+    Expand-XbloomZipArchive $archive $extractRoot
     $expanded = Assert-NoProjectReparsePoint (Join-Path $extractRoot "node-v$NodeVersion-win-x64")
     if (-not (Test-Path -LiteralPath (Join-Path $expanded 'node.exe'))) {
         throw "Node.js archive layout was not recognized."

@@ -7,6 +7,7 @@
 import { useEffect, useRef, useState } from "react";
 import { parseBeanInfo, type Bean, type GenerateRequest, type ParsedBeanInfo } from "../lib/api.js";
 import { brewsLeft, DEFAULT_DOSE_GRAMS } from "../lib/bean-math.js";
+import { hostedPage } from "../lib/companion.js";
 import {
   GENERATION_MODES,
   generationModeOption,
@@ -779,7 +780,13 @@ export default function BeanForm({
                 <div className="col-span-2">
                   <Field
                     label="模型"
-                    hint={models.length === 0 ? "后端未就绪，将使用默认模型" : undefined}
+                    hint={
+                      models.length === 0
+                        ? hostedPage()
+                          ? "尚未配置模型接口，登录后可设置"
+                          : "尚未配置模型接口，可从右上角打开设置"
+                        : undefined
+                    }
                   >
                     <select
                       value={effectiveModel}

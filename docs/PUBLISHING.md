@@ -1,6 +1,6 @@
 # 发布和验收
 
-本文说明 0.2.0 Windows 安装包和多用户 Hosted 云端版的发布流程。它是发布检查清单，不是线上部署结果记录；最终发布说明请使用本次命令的真实输出。
+本文说明 0.2.1 Windows 安装包和多用户 Hosted 云端版的发布流程。它是发布检查清单，不是线上部署结果记录；最终发布说明请使用本次命令的真实输出。
 
 ## 0.2 发布范围
 
@@ -107,7 +107,7 @@ guest 密钥由部署脚本通过安全输入读取，和账号个人 BYOK 分�
 1. 更新版本化公开文档和 `CHANGELOG.md`。
 2. 运行 `npm run verify`、`npm run check:release` 以及 Windows/Hosted 验收矩阵。
 3. 检查 `git diff --check` 和 `git status --short`。
-4. 创建 `v0.2.0` tag，并使用仓库已有的发布 workflow 发布 GitHub Release。workflow 会从 tag 对应版本打包被 Git 跟踪的文件；打 tag 前确认所有公开文档都已被 Git 跟踪。
+4. 创建与根 `package.json` 完全一致的 tag（当前为 `v0.2.1`），并使用仓库已有的发布 workflow 发布 GitHub Release。workflow 会拒绝版本不匹配的 tag，并从 tag 对应版本打包被 Git 跟踪的文件；打 tag 前确认所有公开文档都已被 Git 跟踪。
 5. 发布 workflow 生成 Windows 压缩包和 checksum 时，将它们附在 GitHub Release 中。
 6. 发布说明写入实际验证输出；标记为 `NOT RUN` 的项目同时列出人工跟进项。
 

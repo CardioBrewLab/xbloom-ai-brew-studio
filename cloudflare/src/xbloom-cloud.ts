@@ -400,6 +400,16 @@ export async function handleXbloomRoute(
       return json({ ok: false, message: detailOf(response) }, 404);
     return json({ ok: true, recipe: parseRecipeVo(vo), raw: response });
   }
+  if (request.method === "GET" && path === "/api/cloud/status" && !user) {
+    return json({
+      reachable: true,
+      loggedIn: false,
+      proxyUsed: false,
+      autoLogin: false,
+      workspaceLoginRequired: true,
+      message: "请先登录工作台账号，再连接 xBloom App 账号",
+    });
+  }
   if (!user) return json({ ok: false, message: "请先登录工作台账号" }, 401);
   if (request.method === "GET" && path === "/api/cloud/status") {
     const stored = await loadStored(env, user);

@@ -186,6 +186,18 @@ export default function App() {
   }, [refreshCloud, refreshConfig]);
 
   useEffect(() => {
+    if (backendUp) return;
+    const retry = window.setInterval(() => void refreshConfig(), 10_000);
+    return () => window.clearInterval(retry);
+  }, [backendUp, refreshConfig]);
+
+  useEffect(() => {
+    if (cloud !== null) return;
+    const retry = window.setInterval(refreshCloud, 10_000);
+    return () => window.clearInterval(retry);
+  }, [cloud, refreshCloud]);
+
+  useEffect(() => {
     if (config?.deployment !== "cloudflare") return;
     let cancelled = false;
     api
@@ -1002,13 +1014,17 @@ export default function App() {
         <div className="border-b border-[var(--line)] bg-[var(--bg-inset)]">
           <div className="mx-auto flex h-11 max-w-[1600px] items-center gap-2 px-6 text-xs text-[var(--tx-2)]">
             <StatusDot tone="warn" />
-            <span>
-              后端服务未启动，界面以离线模式展示 —— 请在仓库根目录运行{" "}
-              <code className="rounded bg-[var(--bg-card)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--tx-1)]">
-                npm run dev
-              </code>{" "}
-              后刷新页面。
-            </span>
+            {hostedPage() ? (
+              <span>云端服务暂时未连通，正在自动重试。</span>
+            ) : (
+              <span>
+                本地后端未启动 —— 请在仓库根目录运行{" "}
+                <code className="rounded bg-[var(--bg-card)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--tx-1)]">
+                  npm run dev
+                </code>{" "}
+                后刷新页面。
+              </span>
+            )}
           </div>
         </div>
       )}
@@ -1223,6 +1239,7 @@ export default function App() {
               cloud={cloud}
               onCloudChanged={refreshCloud}
               onOpenPreview={() => setPreviewOpen(true)}
+              onOpenWorkspaceAccount={() => setAccountOpen(true)}
               cloudTableId={cloudTableId ?? undefined} // 已发布徽标绑定当前配方（任务 #118）
             />
             <HistoryList
@@ -1327,6 +1344,7 @@ export default function App() {
             onChanged={async (next) => {
               setAccount(next);
               const nextConfig = await refreshConfig();
+              refreshCloud();
               refreshBeans();
               void refreshHistory();
               if (next.authenticated && !nextConfig?.modelConfigured) setSettingsOpen(true);

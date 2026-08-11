@@ -11,6 +11,7 @@ import type { AddressInfo } from "node:net";
 import express from "express";
 import { generateRouter } from "../src/routes/generate.js";
 import { config } from "../src/config.js";
+import { shutdownHttpServer } from "./helpers/http-server.js";
 
 // ---------------------------------------------------------------------------
 // mock LLM（与 generate-candidates.test.ts 同模式）
@@ -87,6 +88,9 @@ let appServer: http.Server;
 let mock: { server: http.Server; requests: Array<Record<string, unknown>> } | null = null;
 const saved = {
   baseUrl: "",
+  apiKey: "",
+  fallbackModel: "",
+  thirdModel: "",
   candidates: 0,
   threshold: 0,
   maxRounds: 0,
@@ -94,6 +98,9 @@ const saved = {
 
 before(async () => {
   saved.baseUrl = config.llm.baseUrl;
+  saved.apiKey = config.llm.apiKey;
+  saved.fallbackModel = config.llm.fallbackModel;
+  saved.thirdModel = config.llm.thirdModel;
   saved.candidates = config.generateCandidates;
   saved.threshold = config.candidateScoreThreshold;
   saved.maxRounds = config.researchRetryMaxRounds;
@@ -106,25 +113,21 @@ before(async () => {
   appPort = (appServer.address() as AddressInfo).port;
 });
 
-function shutdown(server: http.Server | null | undefined) {
-  if (!server) return;
-  server.close();
-  server.closeAllConnections?.();
-}
-
 after(async () => {
   config.llm.baseUrl = saved.baseUrl;
+  config.llm.apiKey = saved.apiKey;
+  config.llm.fallbackModel = saved.fallbackModel;
+  config.llm.thirdModel = saved.thirdModel;
   config.generateCandidates = saved.candidates;
   config.candidateScoreThreshold = saved.threshold;
   config.researchRetryMaxRounds = saved.maxRounds;
-  shutdown(appServer);
-  shutdown(mock?.server);
+  await Promise.all([shutdownHttpServer(appServer), shutdownHttpServer(mock?.server)]);
 });
 
 async function useMockLlm(
   queue: Array<{ content?: string; status?: number }>,
 ): Promise<Array<Record<string, unknown>>> {
-  shutdown(mock?.server);
+  await shutdownHttpServer(mock?.server);
   mock = startMockLlm(queue);
   mock.server.listen(0, "127.0.0.1");
   await once(mock.server, "listening");

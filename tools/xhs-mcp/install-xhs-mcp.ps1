@@ -7,7 +7,8 @@ $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $Directory = [IO.Path]::GetFullPath($PSScriptRoot)
-$Release = Import-PowerShellDataFile -LiteralPath (Join-Path $Directory 'xhs-mcp-release.psd1')
+. (Join-Path $Directory '..\..\scripts\windows-compat.ps1')
+$Release = Import-XbloomFlatPsd1 (Join-Path $Directory 'xhs-mcp-release.psd1')
 $Version = [string]$Release.Version
 $ExpectedSha256 = ([string]$Release.Sha256).ToUpperInvariant()
 $AssetName = [string]$Release.AssetName
@@ -32,7 +33,7 @@ foreach ($path in @($Directory, $Destination, $Temporary)) {
 }
 
 if (Test-Path -LiteralPath $Destination) {
-    $currentHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToUpperInvariant()
+    $currentHash = (Get-XbloomSha256 $Destination).ToUpperInvariant()
     if ($currentHash -eq $ExpectedSha256) {
         Write-Host "Xiaohongshu MCP $Version is ready."
         exit 0
@@ -46,7 +47,7 @@ if (Test-Path -LiteralPath $BundledPath -PathType Leaf) {
 } else {
     throw 'The checksum-pinned Xiaohongshu MCP bundle is missing from this release package.'
 }
-$downloadHash = (Get-FileHash -LiteralPath $Temporary -Algorithm SHA256).Hash.ToUpperInvariant()
+$downloadHash = (Get-XbloomSha256 $Temporary).ToUpperInvariant()
 if ($downloadHash -ne $ExpectedSha256) {
     Remove-Item -LiteralPath $Temporary -Force
     throw 'Xiaohongshu MCP download checksum mismatch.'

@@ -21,6 +21,7 @@ import {
   parseXhsQrcodeContents,
   XHS_QRCODE_FALLBACK_TTL_MS,
 } from "../src/lib/xhs-mcp.js";
+import { shutdownHttpServer } from "./helpers/http-server.js";
 
 const BASE = "http://127.0.0.1:18060";
 const realFetch = globalThis.fetch;
@@ -223,9 +224,9 @@ describe("/api/xhs 路由", () => {
     });
   });
 
-  after(() => {
+  after(async () => {
     globalThis.fetch = realFetch;
-    server?.close();
+    await shutdownHttpServer(server);
   });
 
   const url = (p: string) => `http://127.0.0.1:${port}${p}`;

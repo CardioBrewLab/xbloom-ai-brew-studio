@@ -9,6 +9,8 @@ xBloom AI Brew Studio 会把咖啡目标、豆子、风味偏好和调研信息�
 
 新用户优先使用 Hosted 云端版即可完成主要流程；需要本地数据、本地工具或 BLE 设备时，再使用 Windows 本地版。
 
+> EdgeOne 的系统项目域名不是长期公开网址。在中国大陆或全球（含中国大陆）区域，它必须使用控制台生成、有效期约 3 小时的预览链接；令牌过期后，直接访问系统域名会返回 401。面向用户发布时请绑定正式自定义域名，并用 `npm run check:hosted-url -- https://YOUR_DOMAIN/` 验证匿名首页和 `/api/status`。
+
 ## 先选择使用方式
 
 | 能力           | Hosted 云端版                                                                                          | Windows 本地版                                       |

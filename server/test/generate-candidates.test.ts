@@ -62,7 +62,7 @@ function startMockLlm(queue: QueuedResponse[]) {
       res.end(JSON.stringify({ choices: [{ message: { content: item.content ?? "" } }] }));
     });
   });
-  return { server, requests };
+  return { server, requests, queue };
 }
 
 // ---------------------------------------------------------------------------
@@ -173,11 +173,16 @@ function parseEvents(text: string): Array<Record<string, unknown>> {
 
 let appPort = 0;
 let appServer: http.Server;
-let mock: { server: http.Server; requests: Array<Record<string, unknown>> } | null = null;
+let mock: {
+  server: http.Server;
+  requests: Array<Record<string, unknown>>;
+  queue: QueuedResponse[];
+} | null = null;
 
 /** 保存/恢复 config，避免测试间串扰 */
 const saved = {
   baseUrl: "",
+  apiKey: "",
   fallbackModel: "",
   thirdModel: "",
   candidates: 0,
@@ -185,6 +190,7 @@ const saved = {
 
 before(async () => {
   saved.baseUrl = config.llm.baseUrl;
+  saved.apiKey = config.llm.apiKey;
   saved.fallbackModel = config.llm.fallbackModel;
   saved.thirdModel = config.llm.thirdModel;
   saved.candidates = config.generateCandidates;
@@ -195,22 +201,28 @@ before(async () => {
   appServer = app.listen(0, "127.0.0.1");
   await once(appServer, "listening");
   appPort = (appServer.address() as AddressInfo).port;
+
+  // 单个 mock server 贯穿本文件，避免 Windows 上频繁关闭/重开监听端口时，
+  // Undici 的旧 keep-alive 连接与下一条夹具竞争，导致整批候选偶发 fetch failed。
+  mock = startMockLlm([]);
+  mock.server.listen(0, "127.0.0.1");
+  await once(mock.server, "listening");
 });
 
 after(async () => {
   config.llm.baseUrl = saved.baseUrl;
+  config.llm.apiKey = saved.apiKey;
   config.llm.fallbackModel = saved.fallbackModel;
   config.llm.thirdModel = saved.thirdModel;
   config.generateCandidates = saved.candidates;
   await Promise.all([shutdownHttpServer(appServer), shutdownHttpServer(mock?.server)]);
 });
 
-/** 启动一个新 mock LLM 并把 config 指向它（单跳模型链，避免兜底干扰） */
+/** 重置持久 mock LLM 的队列，并把 config 指向它（单跳模型链，避免兜底干扰） */
 async function useMockLlm(queue: QueuedResponse[]): Promise<Array<Record<string, unknown>>> {
-  await shutdownHttpServer(mock?.server);
-  mock = startMockLlm(queue);
-  mock.server.listen(0, "127.0.0.1");
-  await once(mock.server, "listening");
+  assert.ok(mock, "mock LLM server must be started by the suite setup");
+  mock.queue.splice(0, mock.queue.length, ...queue);
+  mock.requests.length = 0;
   const port = (mock.server.address() as AddressInfo).port;
   config.llm.baseUrl = `http://127.0.0.1:${port}/v1`;
   config.llm.apiKey = "test-key";

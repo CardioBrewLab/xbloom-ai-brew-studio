@@ -63,6 +63,14 @@ guest 密钥由部署脚本通过安全输入读取，和账号个人 BYOK 分�
 
 按[中国部署说明](DEPLOY_CHINA.md)完成 EdgeOne 静态托管、`/api/*` Relay、`CLOUDFLARE_WORKER_ORIGIN`、`EDGE_PROXY_SECRET`、自定义域名以及 D1/Worker 验收。稳定的中国大陆域名需要已备案的自定义域名。
 
+正式发布前必须使用无查询参数的自定义域名执行：
+
+```powershell
+npm run check:hosted-url -- https://YOUR_PUBLIC_DOMAIN/
+```
+
+带 EdgeOne 临时预览令牌的成功结果只计入部署预览，不计入公开上线验收。
+
 ## 发布产物验收
 
 ### Windows 全新电脑矩阵

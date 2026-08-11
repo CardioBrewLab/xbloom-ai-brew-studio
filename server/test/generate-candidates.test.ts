@@ -13,8 +13,9 @@ import http from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import express from "express";
-import { generateRouter } from "../src/routes/generate.js";
+import { candidateRecipeDifferenceCount, generateRouter } from "../src/routes/generate.js";
 import { config } from "../src/config.js";
+import type { Recipe } from "../src/lib/recipe-schema.js";
 
 // ---------------------------------------------------------------------------
 // mock LLM：按请求到达顺序消费响应队列；stream:true 回 SSE，否则回一次性 JSON
@@ -25,6 +26,8 @@ interface QueuedResponse {
   status?: number;
   /** 模型正文内容（配方 JSON 代码块或坏文本） */
   content?: string;
+  /** 在收到请求后立即断开 socket，模拟 Undici TypeError: fetch failed */
+  disconnect?: boolean;
 }
 
 function startMockLlm(queue: QueuedResponse[]) {
@@ -36,6 +39,10 @@ function startMockLlm(queue: QueuedResponse[]) {
       const body = JSON.parse(raw) as Record<string, unknown>;
       requests.push(body);
       const item = queue.shift() ?? { status: 500 };
+      if (item.disconnect) {
+        req.socket.destroy();
+        return;
+      }
       if ((item.status ?? 200) >= 400) {
         res.writeHead(item.status!, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { message: "rate limited" } }));
@@ -112,6 +119,42 @@ const WARN_RECIPE = {
     },
   ],
 };
+
+const WARN_RECIPE_ALT = {
+  ...WARN_RECIPE,
+  grinderSize: 58,
+  rpm: 100,
+};
+
+const BAD_RECIPE_ALT = {
+  ...BAD_RECIPE,
+  grinderSize: 62,
+  rpm: 100,
+};
+
+describe("MAX 候选实质差异阈值", () => {
+  const complete = {
+    ...GOOD_RECIPE,
+    bypassEnabled: false,
+    bypassVolume: 0,
+    bypassTemp: 85,
+    isSetGrinderSize: 1,
+    theColor: "#C9D5B8",
+    pours: GOOD_RECIPE.pours.map((pour) => ({
+      ...pour,
+      vibBefore: false,
+      vibAfter: false,
+      theName: "Pour",
+    })),
+  } as Recipe;
+
+  it("单个核心参数变化仍视为近重复，两个参数变化才构成独立方案", () => {
+    const oneChange = { ...complete, grinderSize: complete.grinderSize + 2 } as Recipe;
+    const twoChanges = { ...oneChange, rpm: 100 } as Recipe;
+    assert.equal(candidateRecipeDifferenceCount(complete, oneChange), 1);
+    assert.equal(candidateRecipeDifferenceCount(complete, twoChanges), 2);
+  });
+});
 
 const fence = (recipe: unknown): string => "```json\n" + JSON.stringify(recipe, null, 2) + "\n```";
 
@@ -232,8 +275,16 @@ describe("多候选生成路由（任务 #106）", () => {
     for (const r of requests) {
       assert.equal(r.stream, false);
       assert.equal(r.temperature, undefined, "gpt 系模型不下发 temperature");
-      assert.equal(r.seed, 42, "seed 透传固定值 42（best-effort）");
     }
+    assert.deepEqual(
+      requests.map((r) => r.seed),
+      [42, 43, 44],
+      "每个候选使用独立 seed，避免确定性重放",
+    );
+    const directionPrompts = requests.map(
+      (r) => (r.messages as Array<{ content: string }>).at(-1)?.content ?? "",
+    );
+    assert.equal(new Set(directionPrompts).size, 3, "三个候选注入不同设计方向");
 
     // recipe 事件：获胜候选 = 唯一满分配方（grandWater 234），附 candidateScore
     const recipeEv = events.find((e) => e.type === "recipe")!;
@@ -260,7 +311,7 @@ describe("多候选生成路由（任务 #106）", () => {
       { status: 429 },
       { status: 429 },
       { content: fence(GOOD_RECIPE) },
-      { content: fence(GOOD_RECIPE) },
+      { content: fence(MID_RECIPE) },
     ]);
 
     const text = await postGenerate({ description: "冲一杯平衡的手冲咖啡" });
@@ -276,6 +327,65 @@ describe("多候选生成路由（任务 #106）", () => {
     const recipeEv = events.find((e) => e.type === "recipe")!;
     assert.equal((recipeEv.candidateScore as { n: number }).n, 2);
     assert.equal(requests.length, 5, "3 次 429 + 2 次成功 = 5 次请求");
+  });
+
+  it("MAX 单候选 fetch failed：只补发该候选并最终保留 3 份完整结果", async () => {
+    config.generateCandidates = 3;
+    const requests = await useMockLlm([
+      { disconnect: true },
+      { content: fence(MID_RECIPE) },
+      { content: fence(GOOD_RECIPE) },
+      { content: fence(BAD_RECIPE) },
+    ]);
+
+    const text = await postGenerate({ description: "冲一杯平衡的手冲咖啡" });
+    const events = parseEvents(text);
+    const picked = events.find((e) => e.type === "candidates" && e.stage === "picked")!;
+    assert.ok(picked, "瞬时断线重试后必须产出 picked");
+    const results = picked.results as Array<{ status: string }>;
+    assert.equal(results.length, 3);
+    assert.ok(
+      results.every((r) => r.status === "ok"),
+      "三个候选最终都应进入评分",
+    );
+    assert.equal(requests.length, 4, "3 个首轮请求 + 1 个断线候选补发");
+    assert.ok(!events.some((e) => e.type === "error"), "不进入整轮错误路径");
+  });
+
+  it("MAX 参数指纹查重：相同首轮方案只补发重复槽位，最终三案互异", async () => {
+    config.generateCandidates = 3;
+    const requests = await useMockLlm([
+      { content: fence(GOOD_RECIPE) },
+      { content: fence(GOOD_RECIPE) },
+      { content: fence(GOOD_RECIPE) },
+      { content: fence(MID_RECIPE) },
+      { content: fence(BAD_RECIPE) },
+    ]);
+
+    const text = await postGenerate({ description: "冲一杯平衡的手冲咖啡", mode: "max" });
+    const events = parseEvents(text);
+    const picked = events.find((e) => e.type === "candidates" && e.stage === "picked")!;
+    const results = picked.results as Array<{ status: string; recipeSummary?: unknown }>;
+    assert.equal(results.length, 3);
+    assert.ok(results.every((r) => r.status === "ok" && r.recipeSummary));
+    assert.equal(
+      new Set(results.map((r) => JSON.stringify(r.recipeSummary))).size,
+      3,
+      "最终关键参数快照互异",
+    );
+    assert.equal(requests.length, 5, "仅两个重复槽位各补发一次");
+    assert.deepEqual(
+      requests.slice(0, 3).map((r) => r.seed),
+      [42, 43, 44],
+    );
+    assert.deepEqual(
+      requests.slice(3).map((r) => r.seed),
+      [1043, 1044],
+    );
+    for (const request of requests.slice(3)) {
+      const prompt = (request.messages as Array<{ content: string }>).at(-1)?.content ?? "";
+      assert.ok(prompt.includes("核心参数不得重复"), "补发提示携带显式去重约束");
+    }
   });
 
   it("反馈调参模式强制 N=1：不发 candidates 事件、只请求一次（流式）", async () => {
@@ -381,7 +491,7 @@ describe("多候选生成路由（任务 #106）", () => {
 
   it("任务 #113：全体候选被否决时 recipe warning 通道附加优选兜底警告", async () => {
     config.generateCandidates = 2;
-    await useMockLlm([{ content: fence(BAD_RECIPE) }, { content: fence(BAD_RECIPE) }]);
+    await useMockLlm([{ content: fence(BAD_RECIPE) }, { content: fence(BAD_RECIPE_ALT) }]);
 
     const text = await postGenerate({ description: "冲一杯平衡的手冲咖啡" });
     const events = parseEvents(text);
@@ -401,7 +511,7 @@ describe("多候选生成路由（任务 #106）", () => {
     config.generateCandidates = 2;
     const requests = await useMockLlm([
       { content: fence(WARN_RECIPE) },
-      { content: fence(WARN_RECIPE) }, // 双 warn → needsAutoFix → 第三次请求为流式 auto-fix
+      { content: fence(WARN_RECIPE_ALT) }, // 双 warn → needsAutoFix → 第三次请求为流式 auto-fix
       { content: fence(GOOD_RECIPE) }, // auto-fix 输出改写后的配方
     ]);
 

@@ -30,6 +30,10 @@ jobs:
       - name: Verify local and Cloudflare editions
         run: npm run verify
 
+      - name: Rehearse a private-state-free Windows install
+        shell: pwsh
+        run: .\scripts\test-clean-install.ps1 -SkipTests
+
       - name: Audit dependencies
         run: |
           npm audit --audit-level=high

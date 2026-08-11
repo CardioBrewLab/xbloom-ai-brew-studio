@@ -52,7 +52,7 @@ function Test-ProjectServiceProcess($Process, [string]$Name) {
     }
     if ($Name -eq 'Frontend') {
         return ($Process.CommandLine -match '(?i)npx(?:\.cmd)?\s+vite') -or
-            (($Process.CommandLine -match '(?i)(?:^|[\\/\s])vite(?:\.js)?(?:[\s"'']|$)') -and
+            (($Process.CommandLine -match '(?i)(?:^|[\\/\s])vite(?:\.cmd|\.js)?(?:[\s"'']|$)') -and
                 ($Process.CommandLine -match ('(?i)--port\s+' + [regex]::Escape([string]$webPort))))
     }
     return $false

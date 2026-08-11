@@ -13,7 +13,9 @@ import { useState, type ReactNode } from "react";
 import type { CandidateScoreDetail, CandidateScoreSummary } from "../lib/api.js";
 import {
   candidateDimensionLines,
+  candidateHasDistinctScoreTie,
   candidatePickHeadline,
+  candidateRecipeSummaryLines,
   candidateRowScoreText,
   candidatesSoloWinNote,
   type CandidateResultEntry,
@@ -92,6 +94,7 @@ export default function CandidatePickCard({ state }: CandidatePickCardProps) {
             {Array.from({ length: state.total }, (_, i) => {
               const entry = state.results.find((r) => r.index === i);
               const isWinner = state.phase === "picked" && i === winnerIndex;
+              const hasDistinctScoreTie = candidateHasDistinctScoreTie(entry, state.results);
               return (
                 <CandidateRow
                   key={i}
@@ -99,6 +102,7 @@ export default function CandidatePickCard({ state }: CandidatePickCardProps) {
                   entry={entry}
                   phase={state.phase}
                   isWinner={isWinner}
+                  hasDistinctScoreTie={hasDistinctScoreTie}
                   dimsOpen={dimsOpen}
                   onToggleDims={() => setDimsOpen((v) => !v)}
                 />
@@ -125,6 +129,7 @@ function CandidateRow({
   entry,
   phase,
   isWinner,
+  hasDistinctScoreTie,
   dimsOpen,
   onToggleDims,
 }: {
@@ -132,6 +137,7 @@ function CandidateRow({
   entry?: CandidateResultEntry;
   phase: CandidatesState["phase"];
   isWinner: boolean;
+  hasDistinctScoreTie: boolean;
   /** 任务 #121：获胜行维度明细展开态 */
   dimsOpen: boolean;
   onToggleDims: () => void;
@@ -187,6 +193,7 @@ function CandidateRow({
     );
     // 任务 #121：维度加权语义；旧形态（无 dimensions）由 candidateRowScoreText 回退警告/修正文案
     detailText = candidateRowScoreText(entry);
+    if (hasDistinctScoreTie) detailText += " · 同分但参数不同";
     if (entry.deductions && entry.deductions.length > 0) {
       detailText += `（${entry.deductions.slice(0, 2).join("；")}）`;
     }
@@ -208,6 +215,7 @@ function CandidateRow({
 
   // 任务 #121：获胜行逐维度明细（label + score/weight + note）；失败/否决行不可展开
   const dims = isWinner && picked ? candidateDimensionLines(entry) : [];
+  const recipeLines = picked && entry?.status === "ok" ? candidateRecipeSummaryLines(entry) : [];
 
   return (
     <li
@@ -234,6 +242,12 @@ function CandidateRow({
         >
           {detailText}
         </span>
+        {recipeLines.length > 0 && (
+          <span className="mt-1 block rounded-md border border-[var(--line)] bg-[color-mix(in_srgb,var(--bg-card)_55%,transparent)] px-2 py-1.5 text-[11px] leading-relaxed text-[var(--tx-2)]">
+            <span className="tnum block">{recipeLines[0]}</span>
+            <span className="tnum mt-0.5 block text-[var(--tx-3)]">{recipeLines[1]}</span>
+          </span>
+        )}
         {dims.length > 0 && (
           <span className="mt-1 block">
             <button

@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param(
     [switch]$SkipLaunch,
-    [switch]$SkipShortcut
+    [switch]$SkipShortcut,
+    [switch]$SkipBle
 )
 
 $ErrorActionPreference = 'Stop'
@@ -137,8 +138,21 @@ if (-not (Test-Path -LiteralPath $envFile)) {
 
 Push-Location $Root
 try {
-    Write-Host 'Installing locked npm dependencies...'
-    Invoke-Npm @('ci')
+    try {
+        $driveFormat = ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($Root))).DriveFormat
+    } catch {
+        $driveFormat = 'Unknown'
+    }
+    $supportsWorkspaceLinks = $driveFormat -in @('NTFS', 'ReFS')
+    Write-Host "Installing locked npm dependencies (volume: $driveFormat)..."
+    if ($supportsWorkspaceLinks) {
+        Invoke-Npm @('ci')
+    } else {
+        # npm workspaces are directory links. exFAT/FAT cannot host Windows
+        # reparse points, so install the same locked dependency graph physically
+        # at the root; build:shared then materializes the internal shared package.
+        Invoke-Npm @('ci', '--workspaces=false')
+    }
     Write-Host 'Building the application...'
     Invoke-Npm @('run', 'build')
 } finally {
@@ -150,7 +164,9 @@ try {
 # The everyday workflow uploads to the phone App. When Python is already
 # available, prepare the optional Windows BLE device lab as part of setup.
 $pythonReady = (Get-Command py -ErrorAction SilentlyContinue) -or (Get-Command python -ErrorAction SilentlyContinue)
-if ($pythonReady) {
+if ($SkipBle) {
+    Write-Host 'Optional BLE device lab setup skipped by request.'
+} elseif ($pythonReady) {
     try {
         & (Join-Path $Root 'install-ble.ps1')
     } catch {

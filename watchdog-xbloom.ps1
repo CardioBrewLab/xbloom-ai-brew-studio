@@ -271,7 +271,7 @@ function Test-ServiceCommandLine {
     }
     if ($Name -eq 'Frontend') {
         return ($CommandLine -match '(?i)npx(?:\.cmd)?\s+vite') -or
-            (($CommandLine -match '(?i)(?:^|[\\/\s])vite(?:\.js)?(?:[\s"'']|$)') -and
+            (($CommandLine -match '(?i)(?:^|[\\/\s])vite(?:\.cmd|\.js)?(?:[\s"'']|$)') -and
                 ($CommandLine -match ('(?i)--port\s+' + [regex]::Escape([string]$webPort))))
     }
     return $false
@@ -314,9 +314,10 @@ function Start-HiddenService {
         [string[]]$Cmd,
         [string]$LogFile
     )
-    # cmd /c <cmd> 1>"<log>" 2>&1  -- redirect stdout+stderr to a per-launch log.
-    # ROOT has no spaces, so no quoting headaches for cmd.
-    $argLine = '/c ' + ($Cmd -join ' ') + ' 1>"' + $LogFile + '" 2>&1'
+    # Put the absolute project workdir in the launcher's command line. The
+    # ownership guard can then identify both the cmd root and its Node child.
+    $commandText = 'cd /d "' + $WorkDir + '" && ' + ($Cmd -join ' ') + ' 1>"' + $LogFile + '" 2>&1'
+    $argLine = '/d /s /c "' + $commandText + '"'
     try { if (Test-Path -LiteralPath $LogFile) { Clear-Content -LiteralPath $LogFile -ErrorAction SilentlyContinue } } catch { }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = 'cmd.exe'
@@ -348,8 +349,21 @@ $webDir     = Join-Path $ROOT 'web'
 # before launch so a source update never leaves server/web using stale schemas.
 $sharedBuildLog = Join-Path $logDir 'xbloom-shared-build.log'
 $sharedBuildErrorLog = Join-Path $logDir 'xbloom-shared-build-error.log'
+try {
+    $volumeFormat = ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($ROOT))).DriveFormat
+} catch {
+    $volumeFormat = 'Unknown'
+}
+$sharedBuildCommand = if ($volumeFormat -in @('NTFS', 'ReFS')) {
+    'npm run build:shared'
+} else {
+    # Link-less volumes use a physical @xbloom/shared package. Avoid npm's
+    # workspace lifecycle here because it attempts to inspect directory links;
+    # invoke the same pinned compiler and synchronizer directly instead.
+    'node node_modules\typescript\bin\tsc -p shared\tsconfig.json && node scripts\sync-shared-package.mjs'
+}
 $sharedBuild = Start-Process -FilePath 'cmd.exe' `
-    -ArgumentList @('/c', 'npm run build --workspace shared') `
+    -ArgumentList @('/c', $sharedBuildCommand) `
     -WorkingDirectory $ROOT `
     -WindowStyle Hidden `
     -RedirectStandardOutput $sharedBuildLog `
@@ -362,8 +376,8 @@ if ($sharedBuild.ExitCode -ne 0) {
 Write-Log 'Shared contract package rebuilt before service launch.'
 
 $services = @(
-    @{ Name='Backend';  Dir=$serverDir; Cmd=@('npm','run','dev');                            Port=$serverPort; Log=$backendLog;  Pid=$null; DownSince=$null; ConflictLoggedAt=$null; CrashCount=0; LastCrash=$null }
-    @{ Name='Frontend'; Dir=$webDir;    Cmd=@('npx','vite','--port',([string]$webPort),'--strictPort'); Port=$webPort; Log=$frontendLog; Pid=$null; DownSince=$null; ConflictLoggedAt=$null; CrashCount=0; LastCrash=$null }
+    @{ Name='Backend';  Dir=$serverDir; Cmd=@('..\node_modules\.bin\tsx.cmd','watch','src\index.ts'); Port=$serverPort; Log=$backendLog;  Pid=$null; DownSince=$null; ConflictLoggedAt=$null; CrashCount=0; LastCrash=$null }
+    @{ Name='Frontend'; Dir=$webDir;    Cmd=@('..\node_modules\.bin\vite.cmd','--port',([string]$webPort),'--strictPort'); Port=$webPort; Log=$frontendLog; Pid=$null; DownSince=$null; ConflictLoggedAt=$null; CrashCount=0; LastCrash=$null }
 )
 
 Write-Log ("=== watchdog started; ROOT=" + $ROOT + " ===")

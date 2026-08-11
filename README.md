@@ -8,7 +8,7 @@
 
 ![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-2563eb?style=flat-square)
 ![Node](https://img.shields.io/badge/Node.js-22.12%2B-3c873a?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-687%20passing-b47a33?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-706%20passing-b47a33?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-111111?style=flat-square)
 
 </div>
@@ -35,7 +35,7 @@ xBloom App 很适合执行配方，但在真正上传之前，常常还要查豆
 | ------------- | ------------------------------------------------------------------------------------------ |
 | AI 配方工作台 | 自然语言输入、结构化豆档案、OpenAI 兼容模型、SSE 流式过程、参考链接、烘焙商方案输入        |
 | 联网调研      | 小红书优先、SearXNG、Firecrawl、网页搜索兜底；来源去重、他豆拦截、他滤杯识别、状态如实披露 |
-| 多候选择优    | 默认并行生成 3 份方案；七维评分、一票否决、平局裁决、低分换源重调研、参数一致性检查        |
+| 多候选择优    | 三种独立冲煮策略并行生成；参数指纹去重、七维评分、一票否决、平局裁决、低分换源重调研       |
 | 自动审查      | 配方 Schema、粉水比可达性、分段总水、温度/流速/研磨/停顿边界、旁路水规则、最多一轮自动修正 |
 | 曲线与步骤    | 注水量、水温、流速、旁路曲线；参数统计、逐段步骤、方案解读、桌面冲煮引导与计时             |
 | 上传手机 App  | xBloom 登录、发布前字段预览与自动对齐、新建/更新/删除云端配方、云端列表与分享链接          |
@@ -72,6 +72,8 @@ xBloom App 很适合执行配方，但在真正上传之前，常常还要查豆
 
 安装脚本会在项目目录内准备便携版 Node.js、安装依赖、完成构建，并安装经 SHA-256 校验的 Windows 修订版小红书 MCP。修订版可由仓库内脚本从上游 `v2.4.3` 源码复现构建；整个运行环境位于项目自己的 `.runtime` 目录。
 
+安装器已覆盖 NTFS、ReFS 与 exFAT：标准磁盘使用 npm workspace 链接；exFAT 等不支持目录链接的磁盘自动改用物理依赖布局。发布门禁还会在带空格的隔离目录中重新下载便携 Node、构建并启动一份空账号副本。
+
 > 首次启动小红书服务时会下载浏览器运行组件，通常需要几分钟。
 
 ### 已有 Node.js 的开发者
@@ -89,6 +91,8 @@ npm run build
 ## Cloudflare 常在线版
 
 仓库同时提供 [Cloudflare 部署目录](cloudflare/README.md)：同一套 React 界面由 Worker Static Assets 托管，核心配方生成、豆仓和历史使用 Worker + D1；电脑关机后网页继续在线。手机 xBloom App 上传、小红书扫码调研和 BLE 设备实验继续使用每位用户自己的 Windows 本地完整版，不共享作者或部署者的第三方登录态。
+
+当前在线实例：[xbloom-ai-brew-studio.lacy-yarn.workers.dev](https://xbloom-ai-brew-studio.lacy-yarn.workers.dev/)
 
 ## 第一次打开：只填你自己的账号与接口
 
@@ -129,6 +133,7 @@ npm run build
 
 ```powershell
 npm run check:release
+npm run test:install
 ```
 
 它会检查 Git 跟踪文件中是否混入本地配置、会话、压缩包、日志、绝对用户路径或常见密钥格式。
@@ -159,7 +164,7 @@ npm run format:check
 npm run check:release
 ```
 
-当前基线：后端 543 项、前端 142 项、Cloudflare 2 项，共 687 项测试。GitHub Actions 在 Windows 上执行格式、发布安全检查、全量测试、构建与 Worker dry-run；推送 `v*` 标签时会生成可下载的 Release ZIP。
+当前基线：后端 551 项、前端 145 项、Cloudflare 10 项，共 706 项测试。GitHub Actions 在 Windows 上执行格式、发布安全检查、全量测试、构建、Worker 校验与空账号跨目录安装演练；推送 `v*` 标签时会生成可下载的 Release ZIP。
 
 仓库维护者首次公开与打标签的完整步骤见 [发布到 GitHub](docs/PUBLISHING.md)。
 

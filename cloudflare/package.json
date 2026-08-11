@@ -1,6 +1,6 @@
 {
   "name": "@xbloom/cloudflare-hosted",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,5 +14,9 @@
     "@types/node": "^24.0.10",
     "typescript": "^7.0.2",
     "wrangler": "^4.120.1"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260804.1": true
   }
 }

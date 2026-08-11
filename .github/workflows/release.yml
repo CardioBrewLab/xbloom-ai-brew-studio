@@ -28,6 +28,7 @@ jobs:
         run: |
           npm ci
           npm run verify
+          .\scripts\test-clean-install.ps1 -SkipTests
           npm audit --audit-level=high
           npm audit --prefix cloudflare --audit-level=high
 

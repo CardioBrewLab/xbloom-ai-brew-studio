@@ -4,7 +4,9 @@ import { describe, it } from "node:test";
 import {
   CANDIDATES_IDLE,
   candidateDimensionLines,
+  candidateHasDistinctScoreTie,
   candidatePickHeadline,
+  candidateRecipeSummaryLines,
   candidateRowScoreText,
   candidatesDoneNote,
   candidatesErrorReset,
@@ -210,6 +212,73 @@ describe("任务 #121：逐维度明细透传与展开渲染纯函数", () => {
     } as unknown as GenerateEvent);
     const parsed = parseCandidatesNote(candidatesDoneNote(picked));
     assert.deepEqual(parsed.state?.results[0].dimensions, dims);
+  });
+});
+
+describe("MAX 候选关键参数摘要", () => {
+  it("把粉水比、研磨、转速和逐段参数排成两行可比较文案", () => {
+    assert.deepEqual(
+      candidateRecipeSummaryLines({
+        index: 0,
+        status: "ok",
+        recipeSummary: {
+          doseGrams: 15,
+          grandWater: 234,
+          ratio: 16.6,
+          grinderSize: 60,
+          rpm: 90,
+          bypassEnabled: true,
+          bypassVolume: 15,
+          bypassTemp: 82,
+          isSetGrinderSize: 2,
+          pours: [
+            {
+              volume: 100,
+              temperature: 92,
+              flowRate: 3.2,
+              pattern: "center",
+              pausing: 45,
+              vibBefore: true,
+            },
+            { volume: 134, temperature: 90, flowRate: 3.2, pattern: "circular", pausing: 0 },
+          ],
+        },
+      }),
+      [
+        "15g / 萃取 234ml + 旁路 15ml·82℃（最终 1:16.6） · 预磨粉（机器跳过研磨）",
+        "2 段：100ml·92℃·3.2ml/s·中心·停 45s·前振 → 134ml·90℃·3.2ml/s·环绕",
+      ],
+    );
+  });
+
+  it("旧事件没有参数摘要时保持空数组", () => {
+    assert.deepEqual(candidateRecipeSummaryLines({ index: 0, status: "ok", score: 87.6 }), []);
+  });
+
+  it("同分但参数快照不同会明示，真正重复或缺快照不误报", () => {
+    const first = {
+      index: 0,
+      status: "ok" as const,
+      score: 95.8,
+      recipeSummary: {
+        doseGrams: 15,
+        grandWater: 234,
+        ratio: 15.6,
+        grinderSize: 60,
+        rpm: 90,
+        pours: [
+          { volume: 234, temperature: 92, flowRate: 3.2, pattern: "center" as const, pausing: 35 },
+        ],
+      },
+    };
+    const second = {
+      ...first,
+      index: 1,
+      recipeSummary: { ...first.recipeSummary, grinderSize: 64, rpm: 100 },
+    };
+    assert.equal(candidateHasDistinctScoreTie(first, [first, second]), true);
+    assert.equal(candidateHasDistinctScoreTie(first, [first, { ...first, index: 2 }]), false);
+    assert.equal(candidateHasDistinctScoreTie(undefined, [first, second]), false);
   });
 });
 

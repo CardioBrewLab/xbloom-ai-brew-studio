@@ -70,6 +70,9 @@ const LOW_RECIPE = {
   ],
 };
 
+const LOW_RECIPE_ALT_1 = { ...LOW_RECIPE, grinderSize: 58, rpm: 100 };
+const LOW_RECIPE_ALT_2 = { ...LOW_RECIPE, grinderSize: 62, rpm: 70 };
+
 const fence = (recipe: unknown): string => "```json\n" + JSON.stringify(recipe, null, 2) + "\n```";
 
 function parseEvents(text: string): Array<Record<string, unknown>> {
@@ -174,8 +177,8 @@ describe("任务 #131：离线多候选兼容路径（N=3 + research=false）", 
     // research=false 时没有新来源可换，三候选择优后直接交付。
     const requests = await useMockLlm([
       { content: fence(LOW_RECIPE) },
-      { content: fence(LOW_RECIPE) },
-      { content: fence(LOW_RECIPE) },
+      { content: fence(LOW_RECIPE_ALT_1) },
+      { content: fence(LOW_RECIPE_ALT_2) },
     ]);
 
     const text = await postGenerate({

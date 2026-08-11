@@ -30,6 +30,17 @@ Push-Location $PSScriptRoot
 try {
     npm ci
     if ($LASTEXITCODE -ne 0) { throw 'Cloudflare npm ci failed' }
+
+    # Preflight only: compile without creating remote resources or secrets.
+    if ($SkipDeploy) {
+        $configText = (Get-Content -Raw -LiteralPath $Template -Encoding utf8)
+        $configText = $configText.Replace('xbloom-ai-brew-studio', $WorkerName).Replace('https://YOUR_OPENAI_COMPATIBLE_HOST/v1', $LlmBaseUrl.TrimEnd('/')).Replace('YOUR_MODEL_ID', $LlmModel)
+        [IO.File]::WriteAllText($Config, $configText, [Text.UTF8Encoding]::new($false))
+        Invoke-Npx @('wrangler','deploy','--dry-run','--config',$Config)
+        Write-Host 'Cloudflare preflight passed; no remote resources were changed.' -ForegroundColor Green
+        return
+    }
+
     $createOutput = (& npx wrangler d1 create $DatabaseName 2>&1 | Out-String)
     if ($LASTEXITCODE -ne 0 -and $createOutput -notmatch 'already exists') { throw $createOutput }
     $databaseId = [regex]::Match($createOutput, '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', 'IgnoreCase').Value
@@ -46,13 +57,31 @@ try {
 
     Invoke-Npx @('wrangler','d1','migrations','apply',$DatabaseName,'--remote','--config',$Config)
     $secureKey = Read-Host 'LLM API Key (stored as Cloudflare Worker Secret)' -AsSecureString
-    $plainKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey))
-    try { $plainKey | npx wrangler secret put LLM_API_KEY --config $Config; if ($LASTEXITCODE -ne 0) { throw 'Saving LLM_API_KEY failed' } } finally { $plainKey = $null }
-    $sessionSecret = -join (1..64 | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
-    $sessionSecret | npx wrangler secret put APP_SESSION_SECRET --config $Config
-    if ($LASTEXITCODE -ne 0) { throw 'Saving APP_SESSION_SECRET failed' }
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
+    try {
+        $plainKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        $plainKey | npx wrangler secret put LLM_API_KEY --config $Config
+        if ($LASTEXITCODE -ne 0) { throw 'Saving LLM_API_KEY failed' }
+    } finally {
+        $plainKey = $null
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    }
+    $secretListOutput = (& npx wrangler secret list --config $Config --format json 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) { throw $secretListOutput }
+    $secretList = @($secretListOutput | ConvertFrom-Json)
+    $hasSessionSecret = [bool]($secretList | Where-Object { $_.name -eq 'APP_SESSION_SECRET' } | Select-Object -First 1)
+    if (-not $hasSessionSecret) {
+        $secretBytes = New-Object byte[] 32
+        $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $rng.GetBytes($secretBytes) } finally { $rng.Dispose() }
+        $sessionSecret = ([BitConverter]::ToString($secretBytes)).Replace('-', '').ToLowerInvariant()
+        $sessionSecret | npx wrangler secret put APP_SESSION_SECRET --config $Config
+        if ($LASTEXITCODE -ne 0) { throw 'Saving APP_SESSION_SECRET failed' }
+    } else {
+        Write-Host 'Existing APP_SESSION_SECRET preserved; browser-owned D1 records remain linked.'
+    }
     Invoke-Npx @('wrangler','deploy','--dry-run','--config',$Config)
-    if (-not $SkipDeploy) { Invoke-Npx @('wrangler','deploy','--config',$Config) }
+    Invoke-Npx @('wrangler','deploy','--config',$Config)
 } finally { Pop-Location }
 
 Write-Host 'Cloudflare hosted edition is ready.' -ForegroundColor Green

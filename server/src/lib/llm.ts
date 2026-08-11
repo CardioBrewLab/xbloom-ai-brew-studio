@@ -114,6 +114,44 @@ export function isConcurrencyError(err: unknown): boolean {
   );
 }
 
+/**
+ * 可安全重试的上游瞬时故障：连接中断、连接/响应超时，以及常见临时 5xx。
+ * 认证、参数校验等确定性 4xx 会返回 false，避免重复消耗请求。
+ */
+export function isTransientTransportError(err: unknown): boolean {
+  if (err instanceof LlmRequestError && [408, 425, 500, 502, 503, 504, 529].includes(err.status)) {
+    return true;
+  }
+
+  const messages: string[] = [];
+  const codes: string[] = [];
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && current && typeof current === "object"; depth += 1) {
+    const record = current as { message?: unknown; code?: unknown; cause?: unknown };
+    if (typeof record.message === "string") messages.push(record.message.toLowerCase());
+    if (typeof record.code === "string") codes.push(record.code.toUpperCase());
+    current = record.cause;
+  }
+
+  const message = messages.join(" ");
+  const code = codes.join(" ");
+  return (
+    message.includes("fetch failed") ||
+    message.includes("request timeout") ||
+    message.includes("请求超时") ||
+    message.includes("connection reset") ||
+    message.includes("socket hang up") ||
+    message.includes("other side closed") ||
+    code.includes("UND_ERR_CONNECT_TIMEOUT") ||
+    code.includes("UND_ERR_HEADERS_TIMEOUT") ||
+    code.includes("UND_ERR_SOCKET") ||
+    code.includes("ECONNRESET") ||
+    code.includes("ECONNREFUSED") ||
+    code.includes("ETIMEDOUT") ||
+    code.includes("EPIPE")
+  );
+}
+
 /** 按模型选 key：Claude 系模型走兜底渠道 key，其余（GPT 系）走主 key */
 export function keyForModel(model: string): string {
   const { apiKey, fallbackApiKey } = config.llm;
@@ -282,6 +320,8 @@ export interface CompletionOptions {
   temperature?: number;
   maxTokens?: number;
   signal?: AbortSignal;
+  /** 非流式候选的 best-effort seed；缺省保持历史固定值。 */
+  seed?: number;
 }
 
 /** 单个模型的一次非流式请求；HTTP 非 2xx 抛 LlmRequestError（带状态码） */
@@ -296,7 +336,9 @@ async function completionSingle(
       ? { reasoning_effort: config.llm.reasoningEffort }
       : {};
   const sampling = samplingParams(model, opts);
-  const seed = model.toLowerCase().includes("gpt") ? { seed: LLM_SEED_BEST_EFFORT } : {};
+  const seed = model.toLowerCase().includes("gpt")
+    ? { seed: Number.isFinite(opts.seed) ? Math.trunc(opts.seed!) : LLM_SEED_BEST_EFFORT }
+    : {};
   const requestSignal = llmRequestSignal(opts.signal);
   let res;
   try {

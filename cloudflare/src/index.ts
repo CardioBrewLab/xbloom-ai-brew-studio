@@ -1,5 +1,13 @@
-import { extractJsonObject, normalizeRecipe, scoreRecipe, type HostedRecipe } from "./recipe";
-import { browserOwner, generationQuotaSubjects, sameOriginMutation } from "./session";
+import {
+  extractJsonObject,
+  hostedRecipeFingerprint,
+  hostedRecipesAreDistinct,
+  hostedRecipeSummary,
+  normalizeRecipeWithReport,
+  scoreHostedRecipe,
+  type HostedRecipe,
+} from "./recipe.ts";
+import { browserOwner, generationQuotaSubjects, sameOriginMutation } from "./session.ts";
 
 interface Env {
   DB: D1Database;
@@ -80,20 +88,85 @@ function llmEndpoint(env: Env): string {
   return new URL(`${base.pathname.replace(/\/$/, "")}/chat/completions`, base).toString();
 }
 
-async function callModel(
+const HOSTED_CANDIDATE_DIRECTIONS = [
+  "稳健基线：均衡、甜感、复现性优先。",
+  "清晰路线：在用户目标内突出干净度、层次和风味辨识度。",
+  "圆润路线：在用户目标内突出甜感、质感和余韵完整度。",
+] as const;
+
+function isTransientModelError(error: unknown): boolean {
+  const message = String((error as Error)?.message ?? error).toLowerCase();
+  return (
+    /http (408|425|429|500|502|503|504|529)\b/.test(message) ||
+    message.includes("fetch failed") ||
+    message.includes("timeout") ||
+    message.includes("network") ||
+    message.includes("connection")
+  );
+}
+
+export function publicHostedFailureReason(error: unknown): string {
+  const message = String((error as Error)?.message ?? error).toLowerCase();
+  const status = Number(message.match(/http\s+(\d{3})/)?.[1] ?? 0);
+  if (status === 400) return "模型接口未接受本次请求参数";
+  if (status === 401 || status === 403) return "模型接口认证未通过";
+  if (status === 404) return "模型或接口路径不存在";
+  if (status === 429) return "模型接口请求较多，自动重试后仍未完成";
+  if ([408, 425, 500, 502, 503, 504, 529].includes(status))
+    return "模型接口暂时繁忙，自动重试后仍未完成";
+  if (message.includes("timeout") || message.includes("abort")) return "模型响应超时";
+  if (
+    message.includes("fetch failed") ||
+    message.includes("network") ||
+    message.includes("connection")
+  )
+    return "网络连接波动，自动重试后仍未完成";
+  if (
+    message.includes("json") ||
+    message.includes("unexpected token") ||
+    message.includes("response missing content")
+  )
+    return "模型响应格式不完整";
+  return "模型接口本次未返回可用配方";
+}
+
+async function wait(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw signal.reason ?? new Error("request aborted");
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error("request aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function callModelOnce(
   env: Env,
   description: string,
   context: Record<string, unknown>,
-): Promise<HostedRecipe> {
+  candidateIndex: number,
+  candidateTotal: number,
+  seed: number,
+  avoidRecipes: HostedRecipe[],
+  requestSignal: AbortSignal,
+): Promise<{ recipe: HostedRecipe; clamps: string[] }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort("timeout"), 120_000);
+  const abortFromRequest = (): void => controller.abort(requestSignal.reason ?? "request aborted");
+  if (requestSignal.aborted) abortFromRequest();
+  else requestSignal.addEventListener("abort", abortFromRequest, { once: true });
   try {
     const response = await fetch(llmEndpoint(env), {
       method: "POST",
       headers: { authorization: `Bearer ${env.LLM_API_KEY}`, "content-type": "application/json" },
       body: JSON.stringify({
         model: env.LLM_MODEL,
-        temperature: 0.3,
+        ...(env.LLM_MODEL.toLowerCase().includes("gpt") ? { seed } : { temperature: 0.3 }),
         messages: [
           {
             role: "system",
@@ -102,7 +175,15 @@ async function callModel(
           },
           {
             role: "user",
-            content: `${description}\n上下文：${JSON.stringify(context).slice(0, 12_000)}`,
+            content:
+              `${description}\n上下文：${JSON.stringify(context).slice(0, 12_000)}\n` +
+              (candidateTotal > 1
+                ? `【MAX 候选 ${candidateIndex + 1}/${candidateTotal}】${HOSTED_CANDIDATE_DIRECTIONS[candidateIndex]}`
+                : "【单案生成】优先完整遵循用户目标并保持参数可复现。") +
+              `该方向服从用户明确口味与硬约束；请在研磨、水温、分段、流速或停顿上形成真实可执行差异，避免只改名称。` +
+              (avoidRecipes.length > 0
+                ? `\n以下方案已存在，本次至少在两项核心参数上形成差异：${JSON.stringify(avoidRecipes).slice(0, 10_000)}`
+                : ""),
           },
         ],
       }),
@@ -112,10 +193,104 @@ async function callModel(
     const body = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const content = body.choices?.[0]?.message?.content;
     if (!content) throw new Error("模型没有返回配方正文");
-    return normalizeRecipe(extractJsonObject(content), description.slice(0, 32) || "AI Brew");
+    return normalizeRecipeWithReport(
+      extractJsonObject(content),
+      description.slice(0, 32) || "AI Brew",
+    );
   } finally {
     clearTimeout(timeout);
+    requestSignal.removeEventListener("abort", abortFromRequest);
   }
+}
+
+async function callModel(
+  env: Env,
+  description: string,
+  context: Record<string, unknown>,
+  candidateIndex: number,
+  candidateTotal: number,
+  seed: number,
+  avoidRecipes: HostedRecipe[],
+  signal: AbortSignal,
+): Promise<{ recipe: HostedRecipe; clamps: string[] }> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= 1; attempt += 1) {
+    try {
+      return await callModelOnce(
+        env,
+        description,
+        context,
+        candidateIndex,
+        candidateTotal,
+        seed,
+        avoidRecipes,
+        signal,
+      );
+    } catch (error) {
+      lastError = error;
+      if (signal.aborted || attempt >= 1 || !isTransientModelError(error)) throw error;
+      await wait(350, signal);
+    }
+  }
+  throw lastError;
+}
+
+export interface HostedCandidateOutcome {
+  index: number;
+  recipe?: HostedRecipe;
+  clamps?: string[];
+  error?: string;
+}
+
+/** 生成与桌面前端一致的 candidates SSE 契约。 */
+export function hostedCandidateSelection(outcomes: HostedCandidateOutcome[]) {
+  const valid = outcomes.filter(
+    (outcome): outcome is HostedCandidateOutcome & { recipe: HostedRecipe } =>
+      Boolean(outcome.recipe),
+  );
+  const ranked = valid
+    .map((outcome) => ({ ...outcome, scoreReport: scoreHostedRecipe(outcome.recipe) }))
+    .sort(
+      (left, right) =>
+        right.scoreReport.rankScore - left.scoreReport.rankScore ||
+        hostedRecipeFingerprint(left.recipe).localeCompare(hostedRecipeFingerprint(right.recipe)),
+    );
+  if (ranked.length === 0) throw new Error(outcomes[0]?.error || "候选配方生成失败");
+  const reportByIndex = new Map(ranked.map((item) => [item.index, item.scoreReport]));
+
+  const results = outcomes.map((outcome) =>
+    outcome.recipe
+      ? {
+          index: outcome.index,
+          status: "ok" as const,
+          score: reportByIndex.get(outcome.index)!.score,
+          vetoed: false,
+          vetoReasons: [],
+          warns: 0,
+          clamps: outcome.clamps?.length ?? 0,
+          deductions: reportByIndex.get(outcome.index)!.deductions,
+          recipeSummary: hostedRecipeSummary(outcome.recipe),
+          dimensions: reportByIndex.get(outcome.index)!.dimensions,
+        }
+      : {
+          index: outcome.index,
+          status: "failed" as const,
+          failReason: outcome.error || "上游模型请求未完成",
+        },
+  );
+  const winner = ranked[0];
+  return {
+    winner,
+    ranked,
+    results,
+    scores: ranked.map((item) => ({
+      index: item.index,
+      score: item.scoreReport.score,
+      vetoed: false,
+      warns: 0,
+      clamps: item.clamps?.length ?? 0,
+    })),
+  };
 }
 
 async function incrementQuota(env: Env, subject: string, bucket: string): Promise<number> {
@@ -174,45 +349,115 @@ async function generate(request: Request, env: Env, owner: string): Promise<Resp
         summary: "Hosted 版本轮使用模型上下文与用户提供的参考资料；实时网页来源需本地完整版。",
       },
     );
-  if (count === 3) events.push({ type: "candidates", stage: "start", count: 3 });
-  const settled = await Promise.allSettled(
-    Array.from({ length: count }, (_, index) =>
-      callModel(env, description, { ...body, candidate: index + 1 }),
-    ),
+  if (count === 3) events.push({ type: "candidates", stage: "start", n: 3, round: 0 });
+  const outcomes: HostedCandidateOutcome[] = await Promise.all(
+    Array.from({ length: count }, async (_, index) => {
+      try {
+        const generated = await callModel(
+          env,
+          description,
+          { ...body, candidate: index + 1 },
+          index,
+          count,
+          42 + index,
+          [],
+          request.signal,
+        );
+        return { index, ...generated };
+      } catch (error) {
+        if (request.signal.aborted) throw error;
+        return { index, error: publicHostedFailureReason(error) };
+      }
+    }),
   );
-  const recipes = settled.flatMap((result) =>
-    result.status === "fulfilled" ? [result.value] : [],
-  );
-  if (recipes.length === 0)
-    throw new Error(
-      settled[0].status === "rejected" ? String(settled[0].reason) : "候选配方生成失败",
-    );
-  const ranked = recipes
-    .map((recipe, index) => ({ recipe, index, score: scoreRecipe(recipe) }))
-    .sort((a, b) => b.score - a.score);
+
   if (count === 3) {
-    ranked.forEach((item, index) =>
+    for (const outcome of outcomes) {
+      if (!outcome.recipe) continue;
+      const acceptedRecipes = outcomes
+        .filter((entry) => entry.index < outcome.index && entry.recipe)
+        .map((entry) => entry.recipe!);
+      if (acceptedRecipes.every((recipe) => hostedRecipesAreDistinct(recipe, outcome.recipe!))) {
+        continue;
+      }
+      let replacement: { recipe: HostedRecipe; clamps: string[] } | undefined;
+      let replacementError: string | undefined;
+      for (let retry = 1; retry <= 2; retry += 1) {
+        try {
+          const candidate = await callModel(
+            env,
+            description,
+            { ...body, candidate: outcome.index + 1 },
+            outcome.index,
+            count,
+            42 + outcome.index + retry * 1_000,
+            acceptedRecipes,
+            request.signal,
+          );
+          if (
+            acceptedRecipes.some(
+              (existing) => !hostedRecipesAreDistinct(existing, candidate.recipe),
+            )
+          )
+            continue;
+          replacement = candidate;
+          break;
+        } catch (error) {
+          if (request.signal.aborted) throw error;
+          replacementError = publicHostedFailureReason(error);
+          // 下一次定向补发继续使用新的 seed。
+        }
+      }
+      outcome.recipe = replacement?.recipe;
+      outcome.clamps = replacement?.clamps;
+      outcome.error = replacement
+        ? undefined
+        : replacementError || "方案参数重复，定向补发后仍未形成有效差异";
+    }
+  }
+
+  const selection = hostedCandidateSelection(outcomes);
+  if (count === 3) {
+    outcomes.forEach((outcome, index) =>
       events.push({
         type: "candidates",
         stage: "progress",
-        completed: index + 1,
-        total: recipes.length,
-        candidate: { index: item.index, score: item.score, recipe: item.recipe },
+        done: index + 1,
+        total: 3,
+        round: 0,
+        result: selection.results.find((result) => result.index === outcome.index),
       }),
     );
     events.push({
       type: "candidates",
       stage: "picked",
-      pickedIndex: ranked[0].index,
-      candidates: ranked.map((item) => ({
-        index: item.index,
-        score: item.score,
-        recipe: item.recipe,
-      })),
+      round: 0,
+      winner: selection.winner.index,
+      scores: selection.scores,
+      results: selection.results,
     });
   }
   events.push(
-    { type: "recipe", recipe: ranked[0].recipe, clamped: [], model: env.LLM_MODEL },
+    {
+      type: "recipe",
+      recipe: selection.winner.recipe,
+      clamped: selection.winner.clamps ?? [],
+      model: env.LLM_MODEL,
+      ...(count === 3
+        ? {
+            candidateScore: {
+              n: 3,
+              winner: selection.winner.index,
+              index: selection.winner.index,
+              score: selection.winner.scoreReport.score,
+              vetoed: false,
+              warns: 0,
+              clamps: selection.winner.clamps?.length ?? 0,
+              deductions: selection.winner.scoreReport.deductions,
+            },
+          }
+        : {}),
+    },
     { type: "done" },
   );
   return sse(events);

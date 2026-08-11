@@ -49,7 +49,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Router, type Request, type Response } from "express";
-import { chatCompletion, isConcurrencyError, streamChat, type ChatMessage } from "../lib/llm.js";
+import {
+  chatCompletion,
+  isConcurrencyError,
+  isTransientTransportError,
+  streamChat,
+  type ChatMessage,
+} from "../lib/llm.js";
 import { config } from "../config.js";
 import { fetchReferences, researchBean, type ResearchOutcome } from "../lib/research.js";
 import { clampRecipe, durationWarning, type ClampResult } from "../lib/safety.js";
@@ -94,7 +100,151 @@ function candidateFailReasonText(
   const cap = (s: string) => (s.length > 120 ? `${s.slice(0, 120)}…` : s);
   if (f.kind === "structural") return `结构失败：${cap(f.errors.slice(0, 2).join("；"))}`;
   if (isConcurrencyError(f.err)) return "网关限流/并发失败";
-  return `请求失败：${cap((f.err as Error)?.message ?? String(f.err))}`;
+  if (isTransientTransportError(f.err)) return "网络波动，自动重试后仍未完成";
+  return "上游模型请求未完成";
+}
+
+const CANDIDATE_TRANSPORT_RETRIES = 1;
+const CANDIDATE_RETRY_DELAY_MS = 350;
+const CANDIDATE_DIVERSITY_RETRIES = 2;
+
+const CANDIDATE_DIRECTIONS = [
+  "稳健基线：优先均衡、甜感与高复现性，参数变化克制。",
+  "清晰路线：在用户明确口味内，优先干净度、层次与风味辨识度。",
+  "圆润路线：在用户明确口味内，优先甜感、质感与余韵完整度。",
+  "效率路线：在用户明确口味内，优先更简洁的分段和更稳定的执行窗口。",
+  "探索路线：在安全边界内采用不同的研磨、温度或分段组合，但保持可复现。",
+] as const;
+
+function candidateMessages(
+  base: ChatMessage[],
+  index: number,
+  total: number,
+  avoidRecipes: Recipe[] = [],
+): ChatMessage[] {
+  const direction = CANDIDATE_DIRECTIONS[index % CANDIDATE_DIRECTIONS.length];
+  const avoid =
+    avoidRecipes.length > 0
+      ? `\n以下方案已存在，本次核心参数不得重复；至少在研磨度、水温曲线、分段水量、流速或停顿中的两项形成有依据的差异：\n${avoidRecipes
+          .map((recipe, i) => `参考 ${i + 1}: ${JSON.stringify(recipe)}`)
+          .join("\n")}`
+      : "";
+  return [
+    ...base,
+    {
+      role: "user",
+      content:
+        `【MAX 候选 ${index + 1}/${total}】${direction}` +
+        `这只是同一用户目标下的设计路径，不得改变用户明确指定的口味、粉量、水量或硬约束。` +
+        `请给出有辨识度且可执行的完整方案，避免只改配方名称。${avoid}`,
+    },
+  ];
+}
+
+/**
+ * Count materially different executable parameters. Derived values such as
+ * grandWater and ratio are deliberately not counted again because pour volume
+ * and bypass already determine them.
+ */
+export function candidateRecipeDifferenceCount(left: Recipe, right: Recipe): number {
+  let differences = 0;
+  const changed = (a: number, b: number, threshold: number): void => {
+    if (Math.abs(a - b) >= threshold) differences += 1;
+  };
+
+  if (left.cupType !== right.cupType) differences += 1;
+  changed(left.doseGrams, right.doseGrams, 0.5);
+  changed(left.grinderSize, right.grinderSize, 2);
+  changed(left.rpm, right.rpm, 10);
+  if (left.isSetGrinderSize !== right.isSetGrinderSize) differences += 1;
+  if (left.bypassEnabled !== right.bypassEnabled) differences += 1;
+  if (left.bypassEnabled || right.bypassEnabled) {
+    changed(left.bypassVolume, right.bypassVolume, 5);
+    changed(left.bypassTemp, right.bypassTemp, 1);
+  }
+  if (left.pours.length !== right.pours.length) differences += 1;
+  const pairedPours = Math.min(left.pours.length, right.pours.length);
+  for (let index = 0; index < pairedPours; index += 1) {
+    const a = left.pours[index];
+    const b = right.pours[index];
+    changed(a.volume, b.volume, 5);
+    changed(a.temperature, b.temperature, 1);
+    changed(a.flowRate, b.flowRate, 0.1);
+    changed(a.pausing, b.pausing, 3);
+    if (a.pattern !== b.pattern) differences += 1;
+    if (a.vibBefore !== b.vibBefore) differences += 1;
+    if (a.vibAfter !== b.vibAfter) differences += 1;
+  }
+  return differences;
+}
+
+function candidateRecipesAreDistinct(left: Recipe, right: Recipe): boolean {
+  return candidateRecipeDifferenceCount(left, right) >= 2;
+}
+
+function candidateRecipeSummary(recipe: Recipe): Record<string, unknown> {
+  const effectiveWater = recipe.grandWater + (recipe.bypassEnabled ? recipe.bypassVolume : 0);
+  return {
+    doseGrams: recipe.doseGrams,
+    grandWater: recipe.grandWater,
+    ratio: Math.round((effectiveWater / recipe.doseGrams) * 10) / 10,
+    grinderSize: recipe.grinderSize,
+    rpm: recipe.rpm,
+    bypassEnabled: recipe.bypassEnabled,
+    bypassVolume: recipe.bypassEnabled ? recipe.bypassVolume : 0,
+    bypassTemp: recipe.bypassEnabled ? recipe.bypassTemp : 0,
+    isSetGrinderSize: recipe.isSetGrinderSize,
+    pours: recipe.pours.map((pour) => ({
+      volume: pour.volume,
+      temperature: pour.temperature,
+      flowRate: pour.flowRate,
+      pattern: pour.pattern,
+      pausing: pour.pausing,
+      vibBefore: pour.vibBefore,
+      vibAfter: pour.vibAfter,
+    })),
+  };
+}
+
+function waitForCandidateRetry(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("生成已中断"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error("生成已中断"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * MAX 的每个候选在连接瞬断时独立补发一次完整模型链。
+ * 限流仍交给批次级 3→2→1 策略，避免并行重试进一步放大网关压力。
+ */
+async function generateCandidateContent(
+  messages: ChatMessage[],
+  model: string | undefined,
+  signal: AbortSignal,
+  seed: number,
+): Promise<string> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await chatCompletion(messages, { model, signal, seed });
+    } catch (err) {
+      const mayRetry =
+        !signal.aborted &&
+        attempt < CANDIDATE_TRANSPORT_RETRIES &&
+        !isConcurrencyError(err) &&
+        isTransientTransportError(err);
+      if (!mayRetry) throw err;
+      console.warn(`[generate] 候选请求遇到瞬时网络故障，准备第 ${attempt + 1} 次补发`);
+      await waitForCandidateRetry(CANDIDATE_RETRY_DELAY_MS, signal);
+    }
+  }
 }
 
 /** progress 事件逐候选结果（任务 #120）：成功仅 status，失败附原因 */
@@ -1009,10 +1159,12 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
               (async (): Promise<CandidateOutcome> => {
                 let outcome: CandidateOutcome | undefined;
                 try {
-                  const candidateContent = await chatCompletion(messages, {
-                    model: body.model,
-                    signal: aborter.signal,
-                  });
+                  const candidateContent = await generateCandidateContent(
+                    candidateMessages(messages, i, n),
+                    body.model,
+                    aborter.signal,
+                    42 + round * 100 + i,
+                  );
                   try {
                     const parsed = toClampedRecipe(candidateContent);
                     outcome = {
@@ -1057,6 +1209,70 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
               })(),
             ),
           );
+
+          // 相同提示词 + 固定 seed 会让部分 OpenAI 兼容网关重放同一配方。
+          // 首轮仍并行；仅对核心参数指纹重复的槽位做定向补发，保留 MAX 的速度与三案真实性。
+          const accepted: Array<CandidateOutcome & { parsed: ParsedRecipe }> = [];
+          for (const outcome of outcomes.sort((a, b) => a.index - b.index)) {
+            if (!outcome.parsed) continue;
+            if (
+              accepted.every((entry) =>
+                candidateRecipesAreDistinct(entry.parsed.recipe, outcome.parsed!.recipe),
+              )
+            ) {
+              accepted.push(outcome as CandidateOutcome & { parsed: ParsedRecipe });
+              continue;
+            }
+
+            const existingRecipes = accepted.map((entry) => entry.parsed.recipe);
+            let replacement: CandidateOutcome | undefined;
+            for (let retry = 1; retry <= CANDIDATE_DIVERSITY_RETRIES; retry += 1) {
+              try {
+                const content = await generateCandidateContent(
+                  candidateMessages(messages, outcome.index, n, existingRecipes),
+                  body.model,
+                  aborter.signal,
+                  42 + round * 100 + outcome.index + retry * 1_000,
+                );
+                const parsed = toClampedRecipe(content);
+                if (
+                  accepted.some(
+                    (entry) => !candidateRecipesAreDistinct(entry.parsed.recipe, parsed.recipe),
+                  )
+                )
+                  continue;
+                replacement = {
+                  index: outcome.index,
+                  content,
+                  parsed,
+                  completionOrder: completionSeq++,
+                };
+                break;
+              } catch (err) {
+                if (aborter.signal.aborted) throw err;
+                replacement = {
+                  index: outcome.index,
+                  completionOrder: completionSeq++,
+                  failure: { kind: "request", err },
+                };
+              }
+            }
+
+            if (!replacement?.parsed) {
+              replacement = {
+                index: outcome.index,
+                completionOrder: completionSeq++,
+                failure: {
+                  kind: "structural",
+                  content: outcome.content ?? "",
+                  errors: ["与已有候选的核心参数重复，定向补发后仍未形成有效差异"],
+                },
+              };
+            } else {
+              accepted.push(replacement as CandidateOutcome & { parsed: ParsedRecipe });
+            }
+            outcomes[outcome.index] = replacement;
+          }
 
           const valid = outcomes.filter(
             (o): o is CandidateOutcome & { parsed: ParsedRecipe } => !!o.parsed,
@@ -1165,6 +1381,9 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
               warns: r.warns,
               clamps: r.clamps,
               deductions: r.deductions,
+              recipeSummary: candidateRecipeSummary(
+                valid.find((o) => o.index === r.index)!.parsed.recipe,
+              ),
               // 任务 #121：逐维度加权明细（前端优选明细卡获胜行可展开）
               dimensions: r.dimensions,
             });

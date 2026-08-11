@@ -7,6 +7,7 @@
 ```powershell
 npm ci
 npm run verify
+npm run test:install
 npm audit
 git diff --cached --check
 git status --short
@@ -53,13 +54,13 @@ gh repo create xbloom-ai-brew-studio --public --source . --remote origin --push
 确认 `main` 的 CI 通过后推送版本标签：
 
 ```powershell
-git tag -a v0.1.0 -m "xBloom AI Brew Studio v0.1.0"
-git push origin v0.1.0
+git tag -a v0.1.1 -m "xBloom AI Brew Studio v0.1.1"
+git push origin v0.1.1
 ```
 
 `.github/workflows/release.yml` 会先在只读权限的验证任务中安装锁定依赖、执行全部测试和发布安全检查；通过后，独立的发布任务只归档已验证提交，不再执行仓库脚本，并生成：
 
-- `xbloom-ai-brew-studio-v0.1.0-windows.zip`
+- `xbloom-ai-brew-studio-v0.1.1-windows.zip`
 - 对应的 `.sha256` 校验文件
 - GitHub Release 与自动生成的变更说明
 

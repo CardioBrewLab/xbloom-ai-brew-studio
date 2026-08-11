@@ -21,6 +21,27 @@ export interface CandidateDimensionEntry {
   note: string;
 }
 
+export interface CandidateRecipeSummary {
+  doseGrams: number;
+  grandWater: number;
+  ratio: number;
+  grinderSize: number;
+  rpm: number;
+  bypassEnabled?: boolean;
+  bypassVolume?: number;
+  bypassTemp?: number;
+  isSetGrinderSize?: 1 | 2;
+  pours: Array<{
+    volume: number;
+    temperature: number;
+    flowRate: number;
+    pattern: "center" | "circular" | "spiral";
+    pausing: number;
+    vibBefore?: boolean;
+    vibAfter?: boolean;
+  }>;
+}
+
 /** 逐候选结果（任务 #120：progress.result / picked.results 条目） */
 export interface CandidateResultEntry {
   /** 候选下标（0 起） */
@@ -39,6 +60,8 @@ export interface CandidateResultEntry {
   deductions?: string[];
   /** 逐维度加权明细（任务 #121，picked 后存在；权重和 = 100） */
   dimensions?: CandidateDimensionEntry[];
+  /** 关键参数快照，用于辨别同分方案是否真实不同。 */
+  recipeSummary?: CandidateRecipeSummary;
   /** 失败原因（failed 时存在：结构失败/网关限流/请求失败） */
   failReason?: string;
 }
@@ -166,6 +189,50 @@ export function candidateRowScoreText(entry: CandidateResultEntry): string {
     return `得分 ${score} · 维度加权`;
   }
   return `得分 ${score} · 警告 ${entry.warns ?? 0} · 修正 ${entry.clamps ?? 0}`;
+}
+
+export function candidateRecipeSummaryLines(entry: CandidateResultEntry): string[] {
+  const recipe = entry.recipeSummary;
+  if (!recipe) return [];
+  const patternName = { center: "中心", circular: "环绕", spiral: "螺旋" } as const;
+  const bypass = recipe.bypassEnabled
+    ? ` + 旁路 ${recipe.bypassVolume ?? 0}ml·${recipe.bypassTemp ?? 0}℃`
+    : "";
+  const grinderAction =
+    recipe.isSetGrinderSize === 2
+      ? " · 预磨粉（机器跳过研磨）"
+      : ` · 研磨 ${recipe.grinderSize} · ${recipe.rpm} rpm`;
+  const overview =
+    `${recipe.doseGrams}g / 萃取 ${recipe.grandWater}ml${bypass}（最终 1:${recipe.ratio}）` +
+    grinderAction;
+  const pours = recipe.pours
+    .map(
+      (pour) =>
+        `${pour.volume}ml·${pour.temperature}℃·${pour.flowRate}ml/s·${patternName[pour.pattern]}` +
+        (pour.pausing > 0 ? `·停 ${pour.pausing}s` : "") +
+        (pour.vibBefore ? "·前振" : "") +
+        (pour.vibAfter ? "·后振" : ""),
+    )
+    .join(" → ");
+  return [overview, `${recipe.pours.length} 段：${pours}`];
+}
+
+/** 同分不等于同配方；仅在两边都有参数快照且快照不同的时候给 UI 明示。 */
+export function candidateHasDistinctScoreTie(
+  entry: CandidateResultEntry | undefined,
+  entries: CandidateResultEntry[],
+): boolean {
+  if (entry?.status !== "ok" || typeof entry.score !== "number" || !entry.recipeSummary)
+    return false;
+  const ownSummary = JSON.stringify(entry.recipeSummary);
+  return entries.some(
+    (other) =>
+      other.index !== entry.index &&
+      other.status === "ok" &&
+      other.score === entry.score &&
+      !!other.recipeSummary &&
+      JSON.stringify(other.recipeSummary) !== ownSummary,
+  );
 }
 
 /** 逐维度明细展开数据（任务 #121）：无 dimensions 时返回空数组（行不可展开） */

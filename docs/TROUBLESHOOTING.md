@@ -92,3 +92,13 @@ xBloom 设备通过 BLE 广播，Windows“添加设备”页面未必会像耳�
 ## 重新安装本地运行环境
 
 先关闭工作台，再将 `.runtime` 和 `node_modules` 移到备份目录，然后重新运行 `install-windows.bat`。`data/` 与 `tools/xhs-mcp/runtime/cookies.json` 是用户数据，保留它们即可延续本地记录与登录态。
+
+## 安装在 exFAT 移动盘或数据盘
+
+安装器会读取目标磁盘格式。NTFS/ReFS 使用标准 npm workspace 目录链接；exFAT/FAT 自动安装物理依赖并生成本地 `@xbloom/shared` 包，因此项目目录可继续放在该数据盘。启动守护程序也会按磁盘格式选择对应构建命令。
+
+发布前的跨电脑回归命令如下，它会创建一份不带账号和历史数据的隔离副本：
+
+```powershell
+npm run test:install
+```

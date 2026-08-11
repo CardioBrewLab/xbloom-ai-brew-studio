@@ -17,7 +17,7 @@ import beansRouter from "./routes/beans.js";
 import settingsRouter from "./routes/settings.js";
 import xhsRouter from "./routes/xhs.js";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.1.1";
 
 // 在挂载生成路由前应用本机模型覆盖；只改变 LLM 客户端运行参数，不改变监听地址或部署。
 initializeLlmSettings();

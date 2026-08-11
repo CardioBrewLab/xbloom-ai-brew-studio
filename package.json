@@ -1,6 +1,6 @@
 {
   "name": "xbloom-ai-brew-studio",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "xBloom AI 冲煮工作台 —— LLM 配方生成 / 云端同步 / BLE 实验",
   "license": "MIT",
@@ -13,22 +13,48 @@
     "web"
   ],
   "scripts": {
-    "dev": "npm run build --workspace shared && npm run dev --workspace server",
+    "build:shared": "npm run build --workspace shared && node scripts/sync-shared-package.mjs",
+    "dev": "npm run build:shared && npm run dev --workspace server",
     "dev:server": "npm run dev --workspace server",
     "dev:web": "npm run dev --workspace web",
-    "build": "npm run build --workspace shared && npm run build --workspace server && npm run build --workspace web",
+    "build": "npm run build:shared && npm run build --workspace server && npm run build --workspace web",
     "start": "node server/dist/index.js",
-    "test": "npm run build --workspace shared && npm run test --workspace server",
-    "test:web": "npm run build --workspace shared && npm run test --workspace web",
-    "test:all": "npm run build --workspace shared && npm run test --workspace server && npm run test --workspace web",
+    "test": "npm run build:shared && npm run test --workspace server",
+    "test:web": "npm run build:shared && npm run test --workspace web",
+    "test:all": "npm run build:shared && npm run test --workspace server && npm run test --workspace web",
+    "test:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-clean-install.ps1",
     "check:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-release-safety.ps1",
     "verify:cloudflare": "npm ci --prefix cloudflare && npm --prefix cloudflare test && npm --prefix cloudflare run check",
     "verify": "npm run format:check && npm run check:release && npm run test:all && npm run build && npm run verify:cloudflare",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "echarts": "^6.0.0",
+    "express": "^5.1.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "undici": "^7.11.0",
+    "zod": "^4.0.5"
+  },
+  "optionalDependencies": {
+    "@abandonware/noble": "^1.9.2-26"
+  },
   "devDependencies": {
-    "prettier": "^3.9.6"
+    "@tailwindcss/vite": "^4.1.11",
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.0.10",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "prettier": "^3.9.6",
+    "tailwindcss": "^4.1.11",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.4"
   },
   "overrides": {
     "nanoid": "^3.3.17",

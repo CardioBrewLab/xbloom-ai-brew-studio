@@ -7,8 +7,7 @@
  * { type:"reasoning"|"content", delta }。
  *
  * 双 key 两级兜底（实测结论）：
- * - GPT 系模型默认请求不带思考流；请求体带 reasoning_effort（实测 "high" 生效）
- *   后思考内容才出现在 reasoning_content。故仅对模型名含 "gpt" 的请求下发该参数。
+ * - OpenAI GPT/o 系推理模型可按请求下发 reasoning_effort；其他模型省略该参数。
  * - 主模型失败（尚未产出任何内容前）依次降级：fallbackModel → thirdModel。
  * - key 选择：Claude 系模型（兜底）用 LLM_FALLBACK_API_KEY，其余（gpt-5.6-sol 等）
  *   用 LLM_API_KEY（缺省回退）。模型 ID 一律从配置读取，不硬编码。
@@ -64,7 +63,7 @@ export interface StreamChatOptions {
 
 /**
  * 采样层治理（任务 #106）——按模型分发采样参数（沿用 reasoning_effort 模式）：
- * - 模型名含 "gpt"：一律不下发 temperature（reasoning 模型固定 temperature）；
+ * - GPT 与 o1/o3/o4 推理模型：不下发 temperature；
  * - 其他模型：下发 opts.temperature ?? config.llm.temperature ?? 0.3。
  * 供流式（runStream）与非流式（chatCompletion 候选生成）共用同一策略。
  */
@@ -72,8 +71,43 @@ export function samplingParams(
   model: string,
   opts: { temperature?: number },
 ): { temperature?: number } {
-  if (model.toLowerCase().includes("gpt")) return {};
+  if (openAiReasoningFamily(model)) return {};
   return { temperature: opts.temperature ?? config.llm.temperature ?? 0.3 };
+}
+
+/** 与共享 Hosted 适配器一致的 OpenAI 推理模型识别。 */
+export function usesReasoningTokenBudget(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  return (
+    /^(?:o1|o3|o4)(?:-|$)/.test(normalized) || /^gpt-(?:[5-9]|\d{2,})(?:[.\-]|$)/.test(normalized)
+  );
+}
+
+function openAiReasoningFamily(model: string): boolean {
+  return model.toLowerCase().includes("gpt") || usesReasoningTokenBudget(model);
+}
+
+export function completionTokenParams(
+  model: string,
+  maxTokens: number | undefined,
+): { max_tokens?: number; max_completion_tokens?: number } {
+  if (maxTokens === undefined) return {};
+  return usesReasoningTokenBudget(model)
+    ? { max_completion_tokens: maxTokens }
+    : { max_tokens: maxTokens };
+}
+
+/**
+ * OpenAI 推理强度按任务覆盖：undefined 沿用全局设置，false 表示该请求不下发该参数。
+ * 短结构化任务可关闭推理，避免继承全局 high 后把时间消耗在不必要的思考上。
+ */
+export function reasoningParams(
+  model: string,
+  override?: string | false,
+): { reasoning_effort?: string } {
+  if (!openAiReasoningFamily(model)) return {};
+  const effort = override === false ? "" : (override ?? config.llm.reasoningEffort);
+  return effort ? { reasoning_effort: effort } : {};
 }
 
 /**
@@ -270,12 +304,9 @@ async function* streamSingle(
     return;
   }
   const url = `${config.llm.baseUrl.replace(/\/$/, "")}/chat/completions`;
-  // GPT 系需显式开启 reasoning_effort 才会输出思考流（实测确认）
-  const reasoningEffort =
-    config.llm.reasoningEffort && model.toLowerCase().includes("gpt")
-      ? { reasoning_effort: config.llm.reasoningEffort }
-      : {};
-  // 采样层治理（任务 #106）：gpt 系不下发 temperature；其他模型下发温度（缺省 0.3）
+  // OpenAI 推理模型按全局配置显式开启 reasoning_effort。
+  const reasoningEffort = reasoningParams(model);
+  // 采样层治理（任务 #106）：推理模型不下发 temperature；其他模型下发温度（缺省 0.3）。
   const sampling = samplingParams(model, opts);
   const seed = model.toLowerCase().includes("gpt") ? { seed: LLM_SEED_BEST_EFFORT } : {};
   const requestSignal = llmRequestSignal(opts.signal);
@@ -294,7 +325,7 @@ async function* streamSingle(
         ...reasoningEffort,
         ...sampling,
         ...seed,
-        ...(opts.maxTokens !== undefined ? { max_tokens: opts.maxTokens } : {}),
+        ...completionTokenParams(model, opts.maxTokens),
       }),
       signal: requestSignal,
     });
@@ -355,6 +386,8 @@ export interface CompletionOptions {
   temperature?: number;
   maxTokens?: number;
   signal?: AbortSignal;
+  /** undefined 沿用全局 OpenAI 推理强度；false 关闭；字符串按任务覆盖。 */
+  reasoningEffort?: string | false;
   /** 非流式候选的 best-effort seed；缺省保持历史固定值。 */
   seed?: number;
 }
@@ -390,10 +423,7 @@ async function completionSingle(
     }
   }
   const url = `${config.llm.baseUrl.replace(/\/$/, "")}/chat/completions`;
-  const reasoningEffort =
-    config.llm.reasoningEffort && model.toLowerCase().includes("gpt")
-      ? { reasoning_effort: config.llm.reasoningEffort }
-      : {};
+  const reasoningEffort = reasoningParams(model, opts.reasoningEffort);
   const sampling = samplingParams(model, opts);
   const seed = model.toLowerCase().includes("gpt")
     ? { seed: Number.isFinite(opts.seed) ? Math.trunc(opts.seed!) : LLM_SEED_BEST_EFFORT }
@@ -414,7 +444,7 @@ async function completionSingle(
         ...reasoningEffort,
         ...sampling,
         ...seed,
-        ...(opts.maxTokens !== undefined ? { max_tokens: opts.maxTokens } : {}),
+        ...completionTokenParams(model, opts.maxTokens),
       }),
       signal: requestSignal,
     });

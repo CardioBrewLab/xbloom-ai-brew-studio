@@ -5,7 +5,11 @@ import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 import express from "express";
 import { config } from "../src/config.js";
-import settingsRouter, { isLoopbackHostname } from "../src/routes/settings.js";
+import settingsRouter, {
+  isLoopbackHostname,
+  isTrustedSettingsOrigin,
+  requestConnection,
+} from "../src/routes/settings.js";
 import { shutdownHttpServer } from "./helpers/http-server.js";
 
 let appServer: http.Server;
@@ -77,10 +81,34 @@ describe("POST /api/settings/llm/test", () => {
     assert.equal(isLoopbackHostname("127.0.0.1"), true);
     assert.equal(isLoopbackHostname("[::1]"), true);
     assert.equal(isLoopbackHostname("attacker.example"), false);
+    assert.equal(isTrustedSettingsOrigin("ftp://localhost"), false);
+    assert.equal(isTrustedSettingsOrigin("http://localhost/path"), false);
 
     const result = await testConnection("https://attacker.example");
     assert.equal(result.status, 403);
     assert.equal(result.json.ok, false);
+  });
+
+  it("只在等价地址且 provider 相同时复用当前 API Key", () => {
+    Object.assign(config.llm, {
+      provider: "openai-compatible",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "fixture-api-key",
+      model: "fixture-model",
+    });
+
+    assert.equal(
+      requestConnection({ baseUrl: "https://gateway.example" }).apiKey,
+      "fixture-api-key",
+    );
+    assert.equal(requestConnection({ baseUrl: "https://gateway.example/custom" }).apiKey, "");
+    assert.equal(
+      requestConnection({
+        provider: "anthropic",
+        baseUrl: "https://gateway.example/v1",
+      }).apiKey,
+      "",
+    );
   });
 
   it("uses the configured OpenAI-compatible URL, model and key", async () => {

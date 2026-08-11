@@ -1,5 +1,5 @@
 /** 模型接口设置弹窗：Key 仅提交给本机后端，读取时只显示是否已配置。 */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   api,
   type LlmSettingsPublic,
@@ -36,6 +36,8 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
   const [providers, setProviders] = useState<ModelProviderPreset[]>([]);
   const [detectedModels, setDetectedModels] = useState<string[]>([]);
   const [detecting, setDetecting] = useState(false);
+  /** 丢弃已关闭弹窗或更晚一次识别之前返回的旧响应。 */
+  const detectionRunRef = useRef(0);
 
   const hydrate = (next: LlmSettingsPublic) => {
     setSettings(next);
@@ -72,6 +74,7 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
       });
     return () => {
       cancelled = true;
+      detectionRunRef.current += 1;
     };
   }, [open]);
 
@@ -90,25 +93,40 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
   };
 
   const detect = async () => {
+    const runId = ++detectionRunRef.current;
+    const requestedBaseUrl = draft.baseUrl.trim();
+    const requestedProvider = provider;
+    const requestedApiKey = draft.apiKey.trim();
     setError("");
     setSaved(false);
     setDetecting(true);
     try {
       const result = await api.detectLlmModels({
-        provider,
-        baseUrl: draft.baseUrl.trim(),
-        ...(draft.apiKey.trim() ? { apiKey: draft.apiKey.trim() } : {}),
+        provider: requestedProvider,
+        baseUrl: requestedBaseUrl,
+        ...(requestedApiKey ? { apiKey: requestedApiKey } : {}),
       });
+      if (runId !== detectionRunRef.current) return;
       setProvider(result.provider);
       setDetectedModels(result.models);
-      if (!draft.model.trim() || !result.models.includes(draft.model.trim())) {
-        updateDraft("model", result.models[0] ?? "");
-      }
-      setTestResult(`已识别 ${result.models.length} 个模型 · ${result.latencyMs}ms`);
+      const resolvedBaseUrl = result.baseUrl || requestedBaseUrl;
+      const endpointCompleted =
+        resolvedBaseUrl.replace(/\/+$/, "") !== requestedBaseUrl.replace(/\/+$/, "");
+      setDraft((current) => ({
+        ...current,
+        baseUrl: resolvedBaseUrl,
+        model:
+          !current.model.trim() || !result.models.includes(current.model.trim())
+            ? (result.models[0] ?? "")
+            : current.model,
+      }));
+      setTestResult(
+        `${endpointCompleted ? "已自动补全接口路径 · " : ""}已识别 ${result.models.length} 个模型 · ${result.latencyMs}ms`,
+      );
     } catch (reason) {
-      setError((reason as Error).message);
+      if (runId === detectionRunRef.current) setError((reason as Error).message);
     } finally {
-      setDetecting(false);
+      if (runId === detectionRunRef.current) setDetecting(false);
     }
   };
 
@@ -208,6 +226,7 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
                       key={preset.id}
                       type="button"
                       onClick={() => selectPreset(preset)}
+                      disabled={detecting || saving}
                       className={`rounded-xl border px-3 py-2.5 text-left transition-colors ${
                         selected
                           ? "border-[var(--acc)] bg-[var(--acc-soft)] text-[var(--acc)]"
@@ -233,6 +252,7 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
             <input
               value={draft.baseUrl}
               onChange={(event) => updateDraft("baseUrl", event.target.value)}
+              disabled={detecting || saving}
               placeholder="https://example.com/v1"
               spellCheck={false}
               className={`${inputCls} font-mono text-xs`}
@@ -247,6 +267,7 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
               type="password"
               value={draft.apiKey}
               onChange={(event) => updateDraft("apiKey", event.target.value)}
+              disabled={detecting || saving}
               placeholder={settings?.apiKeyConfigured ? "留空保留当前 Key" : "输入 API Key"}
               autoComplete="off"
               spellCheck={false}
@@ -263,6 +284,7 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
                 <input
                   value={draft.model}
                   onChange={(event) => updateDraft("model", event.target.value)}
+                  disabled={detecting || saving}
                   placeholder="先识别模型，或手动输入"
                   spellCheck={false}
                   list="xbloom-model-options"
@@ -280,6 +302,7 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
               onClick={() => void detect()}
               disabled={
                 detecting ||
+                saving ||
                 !draft.baseUrl.trim() ||
                 (!draft.apiKey.trim() && !settings?.apiKeyConfigured)
               }
@@ -298,6 +321,7 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
                 <input
                   value={draft.fallbackModel}
                   onChange={(event) => updateDraft("fallbackModel", event.target.value)}
+                  disabled={detecting || saving}
                   placeholder="备用模型名称"
                   spellCheck={false}
                   className={`${inputCls} font-mono text-xs`}
@@ -307,6 +331,7 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
                 <input
                   value={draft.thirdModel}
                   onChange={(event) => updateDraft("thirdModel", event.target.value)}
+                  disabled={detecting || saving}
                   placeholder="第三模型名称"
                   spellCheck={false}
                   className={`${inputCls} font-mono text-xs`}
@@ -320,6 +345,7 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
                   type="password"
                   value={draft.fallbackApiKey}
                   onChange={(event) => updateDraft("fallbackApiKey", event.target.value)}
+                  disabled={detecting || saving}
                   placeholder={
                     settings?.fallbackApiKeyConfigured
                       ? "留空保留当前备用 Key"
@@ -350,7 +376,7 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
               <button
                 type="button"
                 onClick={() => void reset()}
-                disabled={saving || !settings?.localOverridePresent}
+                disabled={saving || detecting || !settings?.localOverridePresent}
                 className={btnGhost}
               >
                 {settings?.source === "user" ? "清除个人配置" : "恢复 .env"}
@@ -358,7 +384,7 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
               <button
                 type="button"
                 onClick={() => void save()}
-                disabled={saving || loading}
+                disabled={saving || detecting || loading}
                 className={`${btnPrimary} h-10`}
               >
                 {saving ? (

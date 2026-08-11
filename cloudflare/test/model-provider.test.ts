@@ -3,6 +3,7 @@ import { it } from "node:test";
 import {
   detectModelProvider,
   discoverModels,
+  equivalentModelBaseUrls,
   generateModelText,
   normalizeModelBaseUrl,
   testModelConnection,
@@ -12,6 +13,18 @@ it("按官方域名识别原生 Claude / Gemini，其余走 OpenAI 兼容协议"
   assert.equal(detectModelProvider("https://api.anthropic.com/v1"), "anthropic");
   assert.equal(detectModelProvider("https://generativelanguage.googleapis.com/v1beta"), "gemini");
   assert.equal(detectModelProvider("https://api.deepseek.com/v1"), "openai-compatible");
+});
+
+it("仅把同源根地址与 /v1 视为同一凭据边界", () => {
+  assert.equal(
+    equivalentModelBaseUrls("https://gateway.example.com/", "https://gateway.example.com/v1"),
+    true,
+  );
+  assert.equal(
+    equivalentModelBaseUrls("https://gateway.example.com/api", "https://gateway.example.com/v1"),
+    false,
+  );
+  assert.equal(equivalentModelBaseUrls("https://a.example/v1", "https://b.example/v1"), false);
 });
 
 it("Hosted 地址校验拦截回环和带凭据 URL", () => {
@@ -42,7 +55,72 @@ it("OpenAI 兼容模型发现使用 Bearer 和 /models", async () => {
   );
   assert.equal(requestUrl, "https://api.example.com/v1/models");
   assert.equal(authorization, "Bearer TOKEN");
+  assert.equal(result.baseUrl, "https://api.example.com/v1");
   assert.deepEqual(result.models, ["model-a", "model-b"]);
+});
+
+it("OpenAI 兼容根地址遇到网页时自动尝试 /v1 并返回修正地址", async () => {
+  const requestUrls: string[] = [];
+  const result = await discoverModels(
+    {
+      provider: "openai-compatible",
+      baseUrl: "https://gateway.example.com/",
+      apiKey: "TOKEN",
+    },
+    {
+      fetcher: async (input) => {
+        requestUrls.push(String(input));
+        return String(input).endsWith("/v1/models")
+          ? Response.json({ data: [{ id: "model-a" }] })
+          : new Response("<html>console</html>", {
+              headers: { "content-type": "text/html" },
+            });
+      },
+    },
+  );
+  assert.deepEqual(requestUrls, [
+    "https://gateway.example.com/models",
+    "https://gateway.example.com/v1/models",
+  ]);
+  assert.equal(result.baseUrl, "https://gateway.example.com/v1");
+  assert.deepEqual(result.models, ["model-a"]);
+});
+
+it("OpenAI 兼容根地址的首跳报错时仍在同一总预算内尝试 /v1", async () => {
+  const requestUrls: string[] = [];
+  const result = await discoverModels(
+    {
+      provider: "openai-compatible",
+      baseUrl: "https://gateway.example.com/",
+      apiKey: "TOKEN",
+    },
+    {
+      fetcher: async (input) => {
+        requestUrls.push(String(input));
+        if (requestUrls.length === 1) throw new DOMException("root timeout", "TimeoutError");
+        return Response.json({ data: [{ id: "model-a" }] });
+      },
+    },
+  );
+  assert.equal(result.baseUrl, "https://gateway.example.com/v1");
+  assert.deepEqual(requestUrls, [
+    "https://gateway.example.com/models",
+    "https://gateway.example.com/v1/models",
+  ]);
+});
+
+it("非根路径返回网页时给出 API 地址提示而非请求体 JSON 错误", async () => {
+  await assert.rejects(
+    discoverModels(
+      {
+        provider: "openai-compatible",
+        baseUrl: "https://gateway.example.com/api",
+        apiKey: "TOKEN",
+      },
+      { fetcher: async () => new Response("<html>console</html>") },
+    ),
+    /模型接口模型列表响应不是 JSON.*\/v1/,
+  );
 });
 
 it("Claude 使用 Messages 协议并读取 content.text", async () => {
@@ -146,6 +224,22 @@ it("普通 OpenAI 兼容模型继续使用 max_tokens 与 temperature", async ()
   assert.equal(payload.max_tokens, 32);
   assert.equal(payload.temperature, 0.2);
   assert.equal("max_completion_tokens" in payload, false);
+});
+
+it("生成接口返回网页时给出接口地址提示", async () => {
+  await assert.rejects(
+    generateModelText(
+      {
+        provider: "openai-compatible",
+        baseUrl: "https://gateway.example.com/v1",
+        apiKey: "TOKEN",
+        model: "model-a",
+      },
+      [{ role: "user", content: "HELLO" }],
+      { fetcher: async () => new Response("<html>console</html>") },
+    ),
+    /模型接口生成响应不是 JSON.*\/v1/,
+  );
 });
 
 it("推理模型连接测试预留可见正文所需的 token 空间", async () => {

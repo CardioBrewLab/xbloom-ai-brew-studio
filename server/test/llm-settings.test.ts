@@ -92,6 +92,24 @@ describe("本机模型接口设置", () => {
     assert.equal(target.model, "model-b");
   });
 
+  it("模型识别把同源根地址补全为 /v1 时继续复用已保存 Key", async () => {
+    const { file, defaults, target } = fixture();
+    await updateLlmSettings(
+      { baseUrl: "https://gateway.example/", apiKey: "local-key", model: "model-a" },
+      file,
+      target,
+      defaults,
+    );
+    await updateLlmSettings(
+      { baseUrl: "https://gateway.example/v1", model: "model-b" },
+      file,
+      target,
+      defaults,
+    );
+    assert.equal(target.baseUrl, "https://gateway.example/v1");
+    assert.equal(target.apiKey, "local-key");
+  });
+
   it("跨 endpoint 沿用已保存 Key 时要求显式确认", async () => {
     const { file, defaults, target } = fixture();
     await updateLlmSettings({ apiKey: "local-key", model: "model-a" }, file, target, defaults);

@@ -2,6 +2,7 @@ import {
   MODEL_PROVIDER_PRESETS,
   detectModelProvider,
   discoverModels,
+  equivalentModelBaseUrls,
   normalizeModelBaseUrl,
   testModelConnection,
   type ModelConnection,
@@ -198,7 +199,9 @@ async function draftConnection(
   const baseUrl = normalizeModelBaseUrl(stringField(body.baseUrl, "模型 API 地址", 2048));
   const provider = providerValue(body.provider, baseUrl);
   const suppliedKey = apiKeyValue(body.apiKey);
-  const sameEndpoint = existing?.base_url === baseUrl && existing.provider === provider;
+  const sameEndpoint = existing
+    ? equivalentModelBaseUrls(existing.base_url, baseUrl) && existing.provider === provider
+    : false;
   const apiKey =
     suppliedKey ??
     (sameEndpoint && existing

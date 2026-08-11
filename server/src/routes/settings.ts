@@ -6,6 +6,7 @@ import {
   MODEL_PROVIDER_PRESETS,
   detectModelProvider,
   discoverModels,
+  equivalentModelBaseUrls,
   normalizeModelBaseUrl,
   testModelConnection,
   type FetchLike,
@@ -29,8 +30,9 @@ export function isLoopbackHostname(hostname: string): boolean {
 export function isTrustedSettingsOrigin(origin: string | undefined): boolean {
   if (!origin) return true; // 本机脚本/CLI 没有浏览器 Origin
   try {
-    const host = new URL(origin).hostname.toLowerCase().replace(/^\[|\]$/g, "");
-    return isLoopbackHostname(host);
+    const url = new URL(origin);
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    return url.origin === origin && url.protocol === "http:" && isLoopbackHostname(host);
   } catch {
     return false;
   }
@@ -48,29 +50,30 @@ router.use((req, res, next) => {
   next();
 });
 
-function requestConnection(body: unknown): ModelConnection & { model: string } {
+export function requestConnection(body: unknown): ModelConnection & { model: string } {
   const input = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
   const baseUrl =
     typeof input.baseUrl === "string" && input.baseUrl.trim()
       ? normalizeModelBaseUrl(input.baseUrl, true)
       : config.llm.baseUrl;
-  const sameEndpoint = new URL(baseUrl).origin === new URL(config.llm.baseUrl).origin;
-  const apiKey =
-    typeof input.apiKey === "string" && input.apiKey.trim()
-      ? input.apiKey.trim()
-      : sameEndpoint
-        ? config.llm.apiKey
-        : "";
-  const model =
-    typeof input.model === "string" && input.model.trim() ? input.model.trim() : config.llm.model;
   const provider =
     input.provider === "anthropic" ||
     input.provider === "gemini" ||
     input.provider === "openai-compatible"
       ? input.provider
-      : sameEndpoint
+      : equivalentModelBaseUrls(baseUrl, config.llm.baseUrl)
         ? config.llm.provider
         : detectModelProvider(baseUrl);
+  const sameConnection =
+    equivalentModelBaseUrls(baseUrl, config.llm.baseUrl) && provider === config.llm.provider;
+  const apiKey =
+    typeof input.apiKey === "string" && input.apiKey.trim()
+      ? input.apiKey.trim()
+      : sameConnection
+        ? config.llm.apiKey
+        : "";
+  const model =
+    typeof input.model === "string" && input.model.trim() ? input.model.trim() : config.llm.model;
   return { provider, baseUrl, apiKey, model };
 }
 

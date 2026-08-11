@@ -51,12 +51,13 @@ let appPort = 0;
 let appServer: http.Server;
 let mock: { server: http.Server; requests: Array<Record<string, unknown>> } | null = null;
 
-const saved = { baseUrl: "", fallbackModel: "", thirdModel: "" };
+const saved = { baseUrl: "", fallbackModel: "", thirdModel: "", reasoningEffort: "" };
 
 before(async () => {
   saved.baseUrl = config.llm.baseUrl;
   saved.fallbackModel = config.llm.fallbackModel;
   saved.thirdModel = config.llm.thirdModel;
+  saved.reasoningEffort = config.llm.reasoningEffort;
 
   const app = express();
   app.use(express.json());
@@ -70,6 +71,7 @@ after(async () => {
   config.llm.baseUrl = saved.baseUrl;
   config.llm.fallbackModel = saved.fallbackModel;
   config.llm.thirdModel = saved.thirdModel;
+  config.llm.reasoningEffort = saved.reasoningEffort;
   await Promise.all([shutdownHttpServer(appServer), shutdownHttpServer(mock?.server)]);
 });
 
@@ -83,6 +85,7 @@ async function useMockLlm(queue: QueuedResponse[]): Promise<Array<Record<string,
   config.llm.baseUrl = `http://127.0.0.1:${port}/v1`;
   config.llm.apiKey = "test-key";
   config.llm.model = "gpt-test"; // gpt 系：不下发 temperature（采样层治理口径）
+  config.llm.reasoningEffort = "high";
   config.llm.fallbackModel = "";
   config.llm.thirdModel = "";
   return mock.requests;
@@ -122,6 +125,8 @@ describe("POST /api/beans/parse（任务 #118）", () => {
     assert.equal(requests.length, 1, "恰好一次 LLM 请求");
     assert.equal(requests[0].stream, false, "非流式 chatCompletion");
     assert.equal(requests[0].model, "gpt-test");
+    assert.equal(requests[0].reasoning_effort, "low", "建档抽取使用轻推理而非全局 high");
+    assert.equal(requests[0].max_tokens, 700, "结构化抽取限制为紧凑输出预算");
     const messages = requests[0].messages as Array<{ role: string; content: string }>;
     assert.equal(messages[0].role, "system");
     assert.ok(messages[0].content.includes("严禁编造"), "system prompt 声明严禁编造");

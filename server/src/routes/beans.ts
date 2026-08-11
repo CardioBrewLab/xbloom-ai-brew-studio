@@ -567,8 +567,8 @@ async function polishRecommendations(
 /** 解析请求限长：超出直接 400，不进 LLM */
 const PARSE_TEXT_MAX = 2000;
 
-/** 解析 LLM 超时（ms）：超时返回结构化 {ok:false}，绝不 5xx */
-const PARSE_LLM_TIMEOUT_MS = 30_000;
+/** 解析 LLM 总超时（ms）：兼顾跨境网关抖动；任务自身关闭高推理以减少等待。 */
+const PARSE_LLM_TIMEOUT_MS = 60_000;
 
 /** 烘焙度归一枚举（与豆仓表单 ROAST_LEVELS 一致） */
 export const ROAST_LEVEL_CANON = ["浅焙", "中浅焙", "中焙", "中深焙", "深焙"] as const;
@@ -687,7 +687,7 @@ const PARSE_SYSTEM_PROMPT =
  * POST /api/beans/parse 核心（任务 #118）：一次非流式 JSON-only LLM 请求。
  * 成功 → { status:200, payload:{ ok:true, parsed } }；
  * LLM 失败 / 超时 / 输出非法 → { status:200, payload:{ ok:false, error } }（结构化错误，绝不 5xx）。
- * 30s AbortController 超时兜底。
+ * 60s AbortController 超时兜底；关闭 GPT 高推理，结构化输出只保留所需 token。
  */
 export async function parseBeanInfoText(text: string): Promise<HandlerOutcome> {
   const ctrl = new AbortController();
@@ -706,7 +706,8 @@ export async function parseBeanInfoText(text: string): Promise<HandlerOutcome> {
     const content = await chatCompletion(messages, {
       signal: ctrl.signal,
       temperature: 0.2,
-      maxTokens: 1200,
+      maxTokens: 700,
+      reasoningEffort: "low",
     });
     const json = extractJsonObject(content);
     const parsed = json === null ? null : sanitizeParsedBean(json);
@@ -719,7 +720,7 @@ export async function parseBeanInfoText(text: string): Promise<HandlerOutcome> {
     return { status: 200, payload: { ok: true, parsed } };
   } catch (err) {
     if (ctrl.signal.aborted) {
-      return { status: 200, payload: { ok: false, error: "AI 解析超时（30 秒），请稍后重试" } };
+      return { status: 200, payload: { ok: false, error: "AI 解析超时（60 秒），请稍后重试" } };
     }
     return { status: 200, payload: { ok: false, error: `AI 解析失败：${(err as Error).message}` } };
   } finally {

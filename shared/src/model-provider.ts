@@ -84,6 +84,7 @@ export interface ModelConnection {
 
 export interface ModelDiscoveryResult {
   provider: ModelProvider;
+  baseUrl: string;
   models: string[];
   latencyMs: number;
 }
@@ -132,6 +133,20 @@ export function normalizeModelBaseUrl(value: string, allowLoopback = false): str
     throw new Error("Hosted 版模型地址需要使用公网 HTTPS 域名");
   }
   return url.toString().replace(/\/+$/, "");
+}
+
+/** OpenAI 兼容网关的站点根地址与自动识别出的 /v1 视为同一凭据边界。 */
+export function equivalentModelBaseUrls(left: string, right: string): boolean {
+  const identity = (value: string): string => {
+    const url = new URL(value);
+    const pathname = url.pathname.replace(/\/+$/, "");
+    return `${url.origin}${pathname === "" || pathname === "/v1" ? "/v1" : pathname}`;
+  };
+  try {
+    return identity(left) === identity(right);
+  } catch {
+    return false;
+  }
 }
 
 export function detectModelProvider(baseUrl: string): ModelProvider {
@@ -192,6 +207,17 @@ async function responseFailure(response: Response): Promise<Error> {
   return new Error(`模型接口 HTTP ${response.status}${detail ? `：${detail}` : ""}`);
 }
 
+async function modelResponseJson(response: Response, action: string): Promise<unknown> {
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `模型接口${action}响应不是 JSON；请检查 API 地址，OpenAI 兼容接口通常以 /v1 结尾`,
+    );
+  }
+}
+
 function normalizeModelIds(values: unknown[]): string[] {
   const unique = new Set<string>();
   for (const value of values) {
@@ -216,23 +242,60 @@ export async function discoverModels(
   };
   if (!connection.apiKey) throw new Error("请填写 API Key");
   const fetcher = options.fetcher ?? fetch;
-  const response = await fetcher(endpoint(connection.baseUrl, "models"), {
-    method: "GET",
-    headers: authHeaders(connection),
-    signal: combineSignal(options.signal, 20_000),
-  });
-  if (!response.ok) throw await responseFailure(response);
-  const body = (await response.json()) as {
-    data?: Array<{ id?: unknown }>;
-    models?: Array<{ name?: unknown; id?: unknown }>;
-  };
-  const values =
-    provider === "gemini"
-      ? (body.models ?? []).map((model) => model.name ?? model.id)
-      : (body.data ?? []).map((model) => model.id);
-  const models = normalizeModelIds(values);
-  if (models.length === 0) throw new Error("接口已连接，但模型列表为空；可手动填写模型 ID");
-  return { provider, models, latencyMs: Date.now() - started };
+  const candidates = [connection.baseUrl];
+  const parsedBaseUrl = new URL(connection.baseUrl);
+  if (provider === "openai-compatible" && parsedBaseUrl.pathname === "/") {
+    candidates.push(`${parsedBaseUrl.origin}/v1`);
+  }
+  // 一个识别动作共用 20 秒总预算；根地址探测最多占 5 秒，把余量留给常见的 /v1。
+  const discoverySignal = combineSignal(options.signal, 20_000);
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidateBaseUrl = candidates[index];
+    const mayTryV1 = index === 0 && candidates.length > 1;
+    let response: Response;
+    try {
+      response = await fetcher(endpoint(candidateBaseUrl, "models"), {
+        method: "GET",
+        headers: authHeaders(connection),
+        signal: mayTryV1 ? combineSignal(discoverySignal, 5_000) : discoverySignal,
+      });
+    } catch (error) {
+      if (mayTryV1 && !discoverySignal.aborted) continue;
+      throw error;
+    }
+    if (!response.ok) {
+      if (mayTryV1) {
+        await response.body?.cancel().catch(() => {});
+        continue;
+      }
+      throw await responseFailure(response);
+    }
+
+    let body: {
+      data?: Array<{ id?: unknown }>;
+      models?: Array<{ name?: unknown; id?: unknown }>;
+    };
+    try {
+      body = (await modelResponseJson(response, "模型列表")) as typeof body;
+    } catch (error) {
+      if (mayTryV1) continue;
+      throw error;
+    }
+    const values =
+      provider === "gemini"
+        ? (body.models ?? []).map((model) => model.name ?? model.id)
+        : (body.data ?? []).map((model) => model.id);
+    const models = normalizeModelIds(values);
+    if (models.length > 0) {
+      return { provider, baseUrl: candidateBaseUrl, models, latencyMs: Date.now() - started };
+    }
+    if (!mayTryV1) {
+      throw new Error("接口已连接，但模型列表为空；可手动填写模型 ID");
+    }
+  }
+
+  throw new Error("接口已连接，但模型列表为空；可手动填写模型 ID");
 }
 
 function extractText(provider: ModelProvider, body: unknown): string {
@@ -352,7 +415,7 @@ export async function generateModelText(
     signal: combineSignal(options.signal, options.timeoutMs ?? 120_000),
   });
   if (!response.ok) throw await responseFailure(response);
-  const content = extractText(connection.provider, await response.json());
+  const content = extractText(connection.provider, await modelResponseJson(response, "生成"));
   if (!content) throw new Error("模型接口已响应，但正文为空");
   return content;
 }
@@ -374,6 +437,7 @@ export async function testModelConnection(
   if (!content.trim()) throw new Error("模型连接测试未返回正文");
   return {
     provider: input.provider,
+    baseUrl: normalizeModelBaseUrl(input.baseUrl, options.allowLoopback),
     model: input.model,
     models: [input.model],
     latencyMs: Date.now() - started,

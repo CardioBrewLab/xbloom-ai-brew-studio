@@ -7,7 +7,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { detectModelProvider } from "@xbloom/shared/model-provider";
+import { detectModelProvider, equivalentModelBaseUrls } from "@xbloom/shared/model-provider";
 import { config, type AppConfig } from "../config.js";
 import { atomicWriteJson } from "./data-io.js";
 import { withFileLock } from "./store-mutex.js";
@@ -369,7 +369,8 @@ export async function updateLlmSettings(
     const activeProvider = current?.provider ?? defaults.provider;
     const nextBaseUrl = patch.baseUrl ?? activeBaseUrl;
     const nextProvider = patch.provider ?? activeProvider;
-    const connectionChanged = activeBaseUrl !== nextBaseUrl || activeProvider !== nextProvider;
+    const connectionChanged =
+      !equivalentModelBaseUrls(activeBaseUrl, nextBaseUrl) || activeProvider !== nextProvider;
     const wouldReuseSecret = Boolean(current?.apiKey ?? defaults.apiKey) && !patch.apiKey;
     if (connectionChanged && wouldReuseSecret && !confirmEndpointChange) {
       throw new LlmEndpointConfirmationError();

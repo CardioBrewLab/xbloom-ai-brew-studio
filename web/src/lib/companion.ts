@@ -1,8 +1,10 @@
-const STORAGE_KEY = "xbloom-companion-v1";
+const STORAGE_KEY = "xbloom-companion-v3";
+const LEGACY_STORAGE_KEYS = ["xbloom-companion-v2", "xbloom-companion-v1"] as const;
 
 export interface CompanionConfig {
   baseUrl: string;
   token: string;
+  expiresAt: number;
 }
 
 export interface CompanionResearch {
@@ -31,26 +33,38 @@ export function backendConnectionErrorMessage(hostname: string): string {
     : "无法连接后端服务，请确认 server 已启动（npm run dev）";
 }
 
-export function companionConfig(): CompanionConfig | null {
+export function companionConfig(
+  storage: Pick<Storage, "getItem" | "removeItem"> = localStorage,
+  now = Date.now(),
+): CompanionConfig | null {
+  // v3 服务端只接受摘要型配对记录；清掉历史令牌，让升级后的页面直接展示重新连接入口。
+  for (const key of LEGACY_STORAGE_KEYS) storage.removeItem(key);
   try {
-    const parsed = JSON.parse(
-      localStorage.getItem(STORAGE_KEY) ?? "null",
-    ) as CompanionConfig | null;
-    if (
-      parsed &&
-      /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/i.test(parsed.baseUrl) &&
-      /^[A-Za-z0-9_-]{40,}$/.test(parsed.token)
-    ) {
-      return parsed;
-    }
+    return parseCompanionConfig(storage.getItem(STORAGE_KEY), now);
   } catch {
     // 损坏配置按未配对处理。
   }
   return null;
 }
 
-export function clearCompanion(): void {
-  localStorage.removeItem(STORAGE_KEY);
+export function parseCompanionConfig(raw: string | null, now: number): CompanionConfig | null {
+  try {
+    const parsed = JSON.parse(raw ?? "null") as CompanionConfig | null;
+    return parsed &&
+      /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/i.test(parsed.baseUrl) &&
+      /^[A-Za-z0-9_-]{40,}$/.test(parsed.token) &&
+      Number.isFinite(parsed.expiresAt) &&
+      parsed.expiresAt > now
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearCompanion(storage: Pick<Storage, "removeItem"> = localStorage): void {
+  storage.removeItem(STORAGE_KEY);
+  for (const key of LEGACY_STORAGE_KEYS) storage.removeItem(key);
 }
 
 export async function pairCompanion(): Promise<CompanionConfig> {
@@ -78,12 +92,15 @@ export async function pairCompanion(): Promise<CompanionConfig> {
       if (
         data.type !== "xbloom-companion-paired" ||
         data.baseUrl !== baseUrl ||
-        typeof data.token !== "string"
+        typeof data.token !== "string" ||
+        typeof data.expiresAt !== "number" ||
+        data.expiresAt <= Date.now()
       ) {
         return;
       }
-      const config = { baseUrl, token: data.token };
+      const config = { baseUrl, token: data.token, expiresAt: data.expiresAt };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+      for (const key of LEGACY_STORAGE_KEYS) localStorage.removeItem(key);
       cleanup();
       resolve(config);
     };

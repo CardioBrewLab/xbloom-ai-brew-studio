@@ -15,6 +15,7 @@ import type { GenerationMode } from "./generation-mode.js";
 import type { XhsQrFailureKind } from "./xhs-qr.js";
 import {
   backendConnectionErrorMessage,
+  clearCompanion,
   companionConfig,
   companionFetch,
   hostedPage,
@@ -572,6 +573,19 @@ async function xhsRequest<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiRequestError((error as Error).message, "service_offline");
   }
   const body = await parseJson<T>(response);
+  if (response.status === 401) {
+    clearCompanion();
+    if (path === "/api/xhs/status") {
+      return {
+        ok: true,
+        online: false,
+        loggedIn: false,
+        failureKind: "service_offline",
+        message: "本地助手配对已失效，请重新连接",
+      } as T;
+    }
+    throw new ApiRequestError("本地助手配对已失效，请重新连接", "service_offline");
+  }
   if (
     !response.ok ||
     (body && typeof body === "object" && (body as { ok?: unknown }).ok === false)
@@ -648,6 +662,7 @@ export const api = {
     request<{
       ok: boolean;
       provider: ModelProvider;
+      baseUrl: string;
       models: string[];
       latencyMs: number;
     }>("/api/settings/llm/detect", { method: "POST", body: JSON.stringify(input) }),

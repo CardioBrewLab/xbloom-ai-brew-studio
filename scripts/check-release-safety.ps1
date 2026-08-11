@@ -28,6 +28,33 @@ function Relative-Path([string]$Path) {
     return $Path.Substring($Root.Length).TrimStart('\').Replace('\', '/')
 }
 
+function Get-ReleaseManifestSha256([string]$ManifestPath) {
+    # Keep this release gate compatible with the minimal Windows PowerShell
+    # environments used by GitHub runners and older one-click-install hosts.
+    # Parse the deliberately simple repo-controlled data shape without loading
+    # or executing PSD1 content. Reject comments, here-strings, duplicate keys
+    # and any future syntax that this release gate does not explicitly support.
+    $lines = @([IO.File]::ReadAllLines($ManifestPath) | Where-Object { $_.Trim().Length -gt 0 })
+    if ($lines.Count -lt 3 -or $lines[0].Trim() -ne '@{' -or $lines[$lines.Count - 1].Trim() -ne '}') {
+        throw "Invalid release manifest envelope: $ManifestPath"
+    }
+
+    $manifest = @{}
+    for ($index = 1; $index -lt ($lines.Count - 1); $index++) {
+        $match = [regex]::Match($lines[$index], '^\s*([A-Za-z][A-Za-z0-9]*)\s*=\s*''([^'']*)''\s*$')
+        if (-not $match.Success -or $manifest.ContainsKey($match.Groups[1].Value)) {
+            throw "Invalid release manifest entry at line $($index + 1): $ManifestPath"
+        }
+        $manifest[$match.Groups[1].Value] = $match.Groups[2].Value
+    }
+
+    $sha256 = [string]$manifest['Sha256']
+    if ($sha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+        throw "Missing or invalid Sha256 in release manifest: $ManifestPath"
+    }
+    return $sha256.ToUpperInvariant()
+}
+
 $files = @(Get-CandidateFiles)
 $problems = New-Object System.Collections.Generic.List[string]
 
@@ -51,9 +78,9 @@ $forbiddenPaths = @(
 foreach ($file in $files) {
     $relative = Relative-Path $file
     if ($relative -ieq 'tools/xhs-mcp/bundled/xiaohongshu-mcp-windows-amd64-fixed.exe') {
-        $manifest = Import-PowerShellDataFile -LiteralPath (Join-Path $Root 'tools\xhs-mcp\xhs-mcp-release.psd1')
+        $expectedHash = Get-ReleaseManifestSha256 (Join-Path $Root 'tools\xhs-mcp\xhs-mcp-release.psd1')
         $actualHash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToUpperInvariant()
-        if ($actualHash -ne ([string]$manifest.Sha256).ToUpperInvariant()) {
+        if ($actualHash -ne $expectedHash) {
             $problems.Add("checksum mismatch for bundled MCP executable: $relative")
         }
         continue

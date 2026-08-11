@@ -266,6 +266,25 @@ export interface GenerateRequest {
   };
 }
 
+export interface RecipeSaveOptions {
+  /** Logical-write key reused after a lost response; the server returns the first committed row. */
+  clientRequestId?: string;
+  name?: string;
+  parentId?: string;
+  sourceFeedbackId?: string;
+  changeNotes?: string;
+  refUrls?: string[];
+  beanSnapshot?: string;
+  researchSummary?: string;
+  reviewFindings?: ReviewFinding[];
+  beanId?: string;
+  roasterReference?: string;
+  variant?: "original" | "improved";
+  pairId?: string;
+  brewRationale?: BrewRationaleItem[];
+  cloudTableId?: string;
+}
+
 /** 联网调研来源（research 事件携带） */
 export interface ResearchSource {
   title: string;
@@ -378,11 +397,56 @@ export interface CandidateScoreDetail extends CandidateScoreSummary {
   winner: number;
   /** 扣分标签列表（优选明细展示） */
   deductions: string[];
+  /** 自动修正改变过获胜配方时，评分对应修正前形态。 */
+  postFix?: boolean;
   /** 任务 #131：调研一致性校验结果（N>1 路径携带） */
   researchConsistency?: {
     consistent: boolean;
     deviations: { param: string; value: number; researchValue: number; tolerance: number }[];
   };
+}
+
+export interface CandidateDimensionEntry {
+  key: string;
+  label: string;
+  weight: number;
+  score: number;
+  note: string;
+}
+
+export interface CandidateRecipeSummary {
+  doseGrams: number;
+  grandWater: number;
+  ratio: number;
+  grinderSize: number;
+  rpm: number;
+  bypassEnabled?: boolean;
+  bypassVolume?: number;
+  bypassTemp?: number;
+  isSetGrinderSize?: 1 | 2;
+  pours: Array<{
+    volume: number;
+    temperature: number;
+    flowRate: number;
+    pattern: "center" | "circular" | "spiral";
+    pausing: number;
+    vibBefore?: boolean;
+    vibAfter?: boolean;
+  }>;
+}
+
+export interface CandidateResultEntry {
+  index: number;
+  status: "ok" | "failed";
+  score?: number;
+  vetoed?: boolean;
+  vetoReasons?: string[];
+  warns?: number;
+  clamps?: number;
+  deductions?: string[];
+  dimensions?: CandidateDimensionEntry[];
+  recipeSummary?: CandidateRecipeSummary;
+  failReason?: string;
 }
 
 export type GenerateEvent =
@@ -414,12 +478,20 @@ export type GenerateEvent =
   | { type: "done" }
   // 多候选生成（任务 #106）：仅当候选数 N>1 时出现；N=1 不下发任何 candidates 事件
   | { type: "candidates"; stage: "start"; n: number; round?: number }
-  | { type: "candidates"; stage: "progress"; done: number; total: number; round?: number }
+  | {
+      type: "candidates";
+      stage: "progress";
+      done: number;
+      total: number;
+      result?: CandidateResultEntry;
+      round?: number;
+    }
   | {
       type: "candidates";
       stage: "picked";
       winner: number;
       scores: CandidateScoreSummary[];
+      results?: CandidateResultEntry[];
       round?: number;
     }
   | {
@@ -673,32 +745,7 @@ export const api = {
 
   // ---- 本地配方库 ----
   listRecipes: () => request<{ ok: boolean; recipes: SavedRecipe[] }>("/api/recipes"),
-  saveRecipe: (
-    recipe: Recipe,
-    opts?: {
-      name?: string;
-      parentId?: string;
-      sourceFeedbackId?: string;
-      changeNotes?: string;
-      /** 调研来源 URL / 豆信息原文 / 调研摘要（任务 #35 持久化） */
-      refUrls?: string[];
-      beanSnapshot?: string;
-      researchSummary?: string;
-      /** 自动审查遗留 findings（任务 #36 持久化） */
-      reviewFindings?: ReviewFinding[];
-      /** 豆库豆档案 ID（任务 #50 关联落库） */
-      beanId?: string;
-      /** 烘焙商参考方案原文（任务 #57 持久化） */
-      roasterReference?: string;
-      /** 双方案对比（任务 #62）：原版/改进版标识与配对 id */
-      variant?: "original" | "improved";
-      pairId?: string;
-      /** 方案解读（任务 #72 持久化） */
-      brewRationale?: BrewRationaleItem[];
-      /** 仅在云端回读确认后随本地条目落库。 */
-      cloudTableId?: string;
-    },
-  ) =>
+  saveRecipe: (recipe: Recipe, opts?: RecipeSaveOptions) =>
     request<{ ok: boolean; id: string; version?: number; warning?: string }>("/api/recipes", {
       method: "POST",
       body: JSON.stringify({ recipe, ...opts }),
@@ -733,6 +780,11 @@ export const api = {
     request<{ ok: boolean }>(`/api/recipes/${encodeURIComponent(recipeId)}`, {
       method: "PATCH",
       body: JSON.stringify({ cloudTableId }),
+    }),
+  bindRecipePair: (recipeId: string, pairId: string, name?: string) =>
+    request<{ ok: boolean }>(`/api/recipes/${encodeURIComponent(recipeId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ pairId, variant: "improved", ...(name ? { name } : {}) }),
     }),
 
   // ---- 豆库 ----

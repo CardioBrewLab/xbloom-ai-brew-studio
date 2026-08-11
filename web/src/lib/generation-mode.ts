@@ -28,7 +28,7 @@ export const GENERATION_MODES: readonly GenerationModeOption[] = [
     eyebrow: "MAX",
     name: "细调风味",
     summary: "联网 · 3 份优选",
-    detail: "并行比较三份方案；分数偏低时会换一批来源继续优选。",
+    detail: "先并行比较三份方案；重复或偏低时在时间预算内补发，再交付当前最优。",
   },
 ] as const;
 

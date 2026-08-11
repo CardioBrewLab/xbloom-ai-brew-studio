@@ -73,6 +73,8 @@ const LOW_RECIPE = {
 
 const LOW_RECIPE_ALT_1 = { ...LOW_RECIPE, grinderSize: 58, rpm: 100 };
 const LOW_RECIPE_ALT_2 = { ...LOW_RECIPE, grinderSize: 62, rpm: 70 };
+const GOOD_RECIPE_ALT_1 = { ...GOOD_RECIPE, grinderSize: 57, rpm: 100 };
+const GOOD_RECIPE_ALT_2 = { ...GOOD_RECIPE, grinderSize: 63, rpm: 70 };
 
 const fence = (recipe: unknown): string => "```json\n" + JSON.stringify(recipe, null, 2) + "\n```";
 
@@ -212,5 +214,87 @@ describe("任务 #131：离线多候选兼容路径（N=3 + research=false）", 
 
     // done 事件必须存在
     assert.ok(types.includes("done"), `应有 done 事件：${types.join(", ")}`);
+  });
+});
+
+describe("MAX 后续轮次失败时保留上一轮结果", () => {
+  it("第二轮候选全部失败也交付并标记上一轮最高分方案", async () => {
+    config.generateCandidates = 3;
+    config.candidateScoreThreshold = 999;
+    config.researchRetryMaxRounds = 1;
+
+    await useMockLlm([
+      { content: fence(LOW_RECIPE) },
+      { content: fence(LOW_RECIPE_ALT_1) },
+      { content: fence(LOW_RECIPE_ALT_2) },
+      ...Array.from({ length: 6 }, () => ({ status: 500 })),
+    ]);
+
+    const text = await postGenerate({
+      description: "冲一杯平衡的手冲咖啡",
+      mode: "max",
+    });
+    const events = parseEvents(text);
+    const recipeEvent = events.find((event) => event.type === "recipe");
+    assert.ok(recipeEvent, "后续轮次失败时仍应交付首轮有效配方");
+    assert.match(String(recipeEvent.warning ?? ""), /上一轮最高分方案/);
+    assert.ok(events.some((event) => event.type === "done"));
+    assert.equal(
+      events.some((event) => event.type === "error"),
+      false,
+    );
+    const pickedEvents = events.filter(
+      (event) => event.type === "candidates" && event.stage === "picked",
+    );
+    assert.equal(pickedEvents.at(-1)?.round, 0, "最终候选卡应恢复到实际交付的首轮方案");
+    assert.ok(
+      events.findIndex((event) => event === pickedEvents.at(-1)) <
+        events.findIndex((event) => event === recipeEvent),
+      "恢复后的候选明细应先于最终 recipe 下发",
+    );
+    const completedReviews = events.filter(
+      (event) => event.type === "review" && event.stage === "fixed",
+    );
+    assert.ok(completedReviews.length >= 2, "恢复方案时应重发其审查终态");
+    assert.ok(
+      events.findIndex((event) => event === completedReviews.at(-1)) <
+        events.findIndex((event) => event === recipeEvent),
+      "审查状态必须在最终 recipe 前收敛到 done",
+    );
+  });
+
+  it("第二轮分数回退时交付全过程最高分并恢复对应候选明细", async () => {
+    config.generateCandidates = 3;
+    config.candidateScoreThreshold = 999;
+    config.researchRetryMaxRounds = 1;
+
+    await useMockLlm([
+      { content: fence(GOOD_RECIPE) },
+      { content: fence(GOOD_RECIPE_ALT_1) },
+      { content: fence(GOOD_RECIPE_ALT_2) },
+      { content: fence(LOW_RECIPE) },
+      { content: fence(LOW_RECIPE_ALT_1) },
+      { content: fence(LOW_RECIPE_ALT_2) },
+    ]);
+
+    const text = await postGenerate({ description: "冲一杯平衡的手冲咖啡", mode: "max" });
+    const events = parseEvents(text);
+    const recipeEvent = events.find((event) => event.type === "recipe");
+    assert.ok(recipeEvent);
+    assert.match(String(recipeEvent.warning ?? ""), /全过程最高分方案/);
+    const pickedEvents = events.filter(
+      (event) => event.type === "candidates" && event.stage === "picked",
+    );
+    assert.equal(pickedEvents.at(-1)?.round, 0);
+    const restored = pickedEvents.at(-1)!;
+    const restoredWinner = Number(restored.winner);
+    const restoredScore = (restored.scores as Array<{ index: number; score: number }>).find(
+      (score) => score.index === restoredWinner,
+    )?.score;
+    assert.equal(
+      (recipeEvent.candidateScore as { score?: number } | undefined)?.score,
+      restoredScore,
+      "最终配方评分必须与恢复后的候选卡一致",
+    );
   });
 });

@@ -1,6 +1,6 @@
 #requires -Version 5.1
 # xBloom AI watchdog
-#   - Launches backend (server: npm run dev = tsx watch, port 8787) and
+#   - Launches the built backend (server/dist, port 8787) and
 #     frontend (web: npx vite --port 5180 --strictPort, port 5180) in HIDDEN windows.
 #   - Monitors both ports; auto-restarts whichever dies within a few seconds.
 #   - Opens the browser to http://localhost:5180 once the frontend is ready.
@@ -267,7 +267,8 @@ function Test-ServiceCommandLine {
     }
     if ($Name -eq 'Backend') {
         return ($CommandLine -match '(?i)npm(?:\.cmd)?\s+run\s+dev') -or
-            (($CommandLine -match '(?i)tsx') -and ($CommandLine -match '(?i)src[\\/]index\.ts'))
+            (($CommandLine -match '(?i)tsx') -and ($CommandLine -match '(?i)src[\\/]index\.ts')) -or
+            (($CommandLine -match '(?i)node(?:\.exe)?') -and ($CommandLine -match '(?i)dist[\\/]index\.js'))
     }
     if ($Name -eq 'Frontend') {
         return ($CommandLine -match '(?i)npx(?:\.cmd)?\s+vite') -or
@@ -355,12 +356,12 @@ try {
     $volumeFormat = 'Unknown'
 }
 $sharedBuildCommand = if ($volumeFormat -in @('NTFS', 'ReFS')) {
-    'npm run build:shared'
+    'npm run build:shared && npm run build --workspace server'
 } else {
     # Link-less volumes use a physical @xbloom/shared package. Avoid npm's
     # workspace lifecycle here because it attempts to inspect directory links;
     # invoke the same pinned compiler and synchronizer directly instead.
-    'node node_modules\typescript\bin\tsc -p shared\tsconfig.json && node scripts\sync-shared-package.mjs'
+    'node node_modules\typescript\bin\tsc -p shared\tsconfig.json && node scripts\sync-shared-package.mjs && npm run build --workspace server'
 }
 $sharedBuild = Start-Process -FilePath 'cmd.exe' `
     -ArgumentList @('/c', $sharedBuildCommand) `
@@ -376,7 +377,11 @@ if ($sharedBuild.ExitCode -ne 0) {
 Write-Log 'Shared contract package rebuilt before service launch.'
 
 $services = @(
-    @{ Name='Backend';  Dir=$serverDir; Cmd=@('..\node_modules\.bin\tsx.cmd','watch','src\index.ts'); Port=$serverPort; Log=$backendLog;  Pid=$null; DownSince=$null; ConflictLoggedAt=$null; CrashCount=0; LastCrash=$null }
+    # Build once above, then let this watchdog be the only crash supervisor.
+    # This avoids stale tsx transforms after a checkout is moved across drives.
+    # Use an absolute entry path so the listening Node child's command line carries
+    # this checkout root and remains recognizable after the watchdog itself restarts.
+    @{ Name='Backend';  Dir=$serverDir; Cmd=@('node.exe',('"' + (Join-Path $serverDir 'dist\index.js') + '"')); Port=$serverPort; Log=$backendLog;  Pid=$null; DownSince=$null; ConflictLoggedAt=$null; CrashCount=0; LastCrash=$null }
     @{ Name='Frontend'; Dir=$webDir;    Cmd=@('..\node_modules\.bin\vite.cmd','--port',([string]$webPort),'--strictPort'); Port=$webPort; Log=$frontendLog; Pid=$null; DownSince=$null; ConflictLoggedAt=$null; CrashCount=0; LastCrash=$null }
 )
 

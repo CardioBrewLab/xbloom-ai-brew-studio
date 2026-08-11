@@ -25,6 +25,8 @@ import {
   buildFeedbackEntry,
   deriveVersion,
   FeedbackSchema,
+  isValidPairPatch,
+  normalizeRecipeSaveRequestId,
   loadAll,
   saveAll,
   sanitizeReviewFindings,
@@ -48,10 +50,30 @@ import {
   sanitizeImprovementNotes,
   shouldPersistFreeTextBean,
   shouldRunDualGeneration,
+  shouldEmitVariantFailure,
   variantFailEvent,
 } from "../src/routes/generate.js";
 import { keyForModel, modelChain } from "../src/lib/llm.js";
 import { config } from "../src/config.js";
+
+describe("双方案既有记录配对补丁", () => {
+  it("只接受改进版与 UUID 原版 ID，供幂等复用既有改进版", () => {
+    assert.equal(isValidPairPatch("123e4567-e89b-12d3-a456-426614174000", "improved"), true);
+    assert.equal(isValidPairPatch("123e4567-e89b-12d3-a456-426614174000", "original"), false);
+    assert.equal(isValidPairPatch("not-an-id", "improved"), false);
+  });
+});
+
+describe("配方保存幂等键", () => {
+  it("只接受规范 UUID，并统一为小写", () => {
+    assert.equal(
+      normalizeRecipeSaveRequestId("123E4567-E89B-42D3-A456-426614174000"),
+      "123e4567-e89b-42d3-a456-426614174000",
+    );
+    assert.equal(normalizeRecipeSaveRequestId("not-a-request-id"), undefined);
+    assert.equal(normalizeRecipeSaveRequestId(undefined), undefined);
+  });
+});
 
 function tmpFile(name: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xbloom-test-"));
@@ -153,22 +175,22 @@ describe("自由文本豆信息落档（任务 #35）", () => {
 });
 
 describe("豆库豆生成跳过重复落档（任务 #65）", () => {
-  it("beanId 命中豆档案时不落档：避免选豆场景每次生成追加重复档案", () => {
-    // 前端选豆发送的 beans 文本形如「豆名（产地，处理法…）」，命中时不得再落档
-    assert.equal(shouldPersistFreeTextBean("耶加雪菲 G1（埃塞俄比亚，水洗）", true), false);
-    assert.equal(shouldPersistFreeTextBean("任意文本", true), false);
+  it("请求携带 beanId 时始终不落档：查库短暂未命中也不复制豆档案", () => {
+    // 前端选豆发送的 beans 文本形如「豆名（产地，处理法…）」，beanId 本身即为明确选豆意图。
+    assert.equal(shouldPersistFreeTextBean("耶加雪菲 G1（埃塞俄比亚，水洗）", "bean-1"), false);
+    assert.equal(shouldPersistFreeTextBean("任意文本", "stale-bean-id"), false);
   });
 
-  it("beanId 未命中/无 beanId 且文本非空 → 保留既有自动落档行为", () => {
-    assert.equal(shouldPersistFreeTextBean("林波波 肯尼亚 水洗", false), true);
+  it("无 beanId 且文本非空 → 保留既有自动落档行为", () => {
+    assert.equal(shouldPersistFreeTextBean("林波波 肯尼亚 水洗", undefined), true);
   });
 
   it("文本缺失/空白/非字符串 → 不落档", () => {
-    assert.equal(shouldPersistFreeTextBean(undefined, false), false);
-    assert.equal(shouldPersistFreeTextBean("   ", false), false);
-    assert.equal(shouldPersistFreeTextBean("", false), false);
-    assert.equal(shouldPersistFreeTextBean(123, false), false);
-    assert.equal(shouldPersistFreeTextBean(null, false), false);
+    assert.equal(shouldPersistFreeTextBean(undefined, undefined), false);
+    assert.equal(shouldPersistFreeTextBean("   ", undefined), false);
+    assert.equal(shouldPersistFreeTextBean("", undefined), false);
+    assert.equal(shouldPersistFreeTextBean(123, undefined), false);
+    assert.equal(shouldPersistFreeTextBean(null, undefined), false);
   });
 });
 
@@ -866,6 +888,13 @@ describe("双方案尾段失败降级（任务 #61）", () => {
     assert.ok(ev.message.includes("未能从模型输出中提取到合法的配方 JSON"));
     assert.ok(variantFailEvent("上游超时").message.includes("上游超时"));
     assert.ok(variantFailEvent(undefined).message.includes("未知错误"));
+  });
+
+  it("改进版整轮超时时仍发送失败尾事件，只有客户端断开才静默", () => {
+    assert.equal(shouldEmitVariantFailure("timeout", false), true);
+    assert.equal(shouldEmitVariantFailure(null, false), true);
+    assert.equal(shouldEmitVariantFailure("client", false), false);
+    assert.equal(shouldEmitVariantFailure("timeout", true), false);
   });
 });
 

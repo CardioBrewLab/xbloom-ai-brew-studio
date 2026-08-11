@@ -310,6 +310,68 @@ try {
   });
   assert.equal(recipe1.response.status, 200);
 
+  const recipeRequestId = crypto.randomUUID();
+  const idempotentRecipeBody = {
+    recipe: { ...validRecipe, name: "Idempotent Original" },
+    name: "Idempotent Improved",
+    clientRequestId: recipeRequestId,
+  };
+  const idempotentRecipe1 = await request("/api/recipes", {
+    jar: user1,
+    method: "POST",
+    body: idempotentRecipeBody,
+  });
+  const idempotentRecipe2 = await request("/api/recipes", {
+    jar: user1,
+    method: "POST",
+    body: {
+      ...idempotentRecipeBody,
+      recipe: { ...validRecipe, name: "Late Retry Must Not Replace" },
+      name: "Late Retry Must Not Replace",
+    },
+  });
+  assert.equal(idempotentRecipe1.payload.id, recipeRequestId);
+  assert.equal(idempotentRecipe2.payload.id, recipeRequestId);
+  await request(`/api/recipes/${recipeRequestId}`, {
+    jar: user1,
+    method: "PATCH",
+    body: { pairId: recipe1.payload.id, variant: "improved", name: "Paired Improved" },
+  });
+  const idempotentRecipes = await request("/api/recipes", {
+    jar: user1,
+    requestOrigin: null,
+  });
+  const idempotentRows = idempotentRecipes.payload.recipes.filter(
+    (entry) => entry.id === recipeRequestId,
+  );
+  assert.equal(idempotentRows.length, 1);
+  assert.equal(idempotentRows[0].recipe.name, "Paired Improved");
+
+  const concurrentRequestId = crypto.randomUUID();
+  await Promise.all([
+    request("/api/recipes", {
+      jar: user1,
+      method: "POST",
+      body: {
+        recipe: { ...validRecipe, name: "Concurrent A" },
+        clientRequestId: concurrentRequestId,
+      },
+    }),
+    request("/api/recipes", {
+      jar: user1,
+      method: "POST",
+      body: {
+        recipe: { ...validRecipe, name: "Concurrent B" },
+        clientRequestId: concurrentRequestId,
+      },
+    }),
+  ]);
+  const concurrentRows = (
+    await request("/api/recipes", { jar: user1, requestOrigin: null })
+  ).payload.recipes.filter((entry) => entry.id === concurrentRequestId);
+  assert.equal(concurrentRows.length, 1);
+  assert.ok(["Concurrent A", "Concurrent B"].includes(concurrentRows[0].recipe.name));
+
   const preview = await request("/api/cloud/publish-preview", {
     jar: user1,
     method: "POST",

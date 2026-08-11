@@ -30,6 +30,7 @@ import {
   type CloudStatus,
   type GenerateRequest,
   type ResearchSource,
+  type RecipeSaveOptions,
   type ReviewFinding,
   type SavedRecipe,
   type ServerConfig,
@@ -56,6 +57,15 @@ import {
 } from "./lib/variant.js";
 import { saveCompletionIsCurrent } from "./lib/save-state.js";
 import { companionConfig, companionResearch, hostedPage } from "./lib/companion.js";
+import {
+  generatedRecipeIsCurrent,
+  generatedRecipeSaveOptions,
+  reusableGeneratedSave,
+  reusableGeneratedSaveCheckpointForRecipe,
+  sameRecipeSnapshot,
+  savedPairVariantForRecipe,
+  type GeneratedSaveCheckpoint,
+} from "./lib/generated-history.js";
 
 // Heavy charts, QR generation, secondary pages and modal workflows stay out of
 // the initial desktop shell. This keeps the first workbench paint small while
@@ -106,17 +116,19 @@ const REVIEW_IDLE: ReviewInfo = { phase: "idle", findings: [], fixed: false };
 const CANDIDATES_RESET: CandidatesState = CANDIDATES_IDLE;
 
 /** 生成阶段元数据（任务 #35/#36/#50）：保存配方时透传 refUrls/豆信息原文/调研摘要/审查结果/豆库关联持久化 */
-interface GenMeta {
-  refUrls?: string[];
-  beanSnapshot?: string;
-  researchSummary?: string;
-  reviewFindings?: ReviewFinding[];
-  /** 本次生成所选豆库豆档案 ID（仅当已选豆库豆时非空） */
-  beanId?: string;
-  /** 本次生成用户粘贴的烘焙商参考方案原文（任务 #57，仅当非空时存在） */
-  roasterReference?: string;
-  /** 方案解读（任务 #72，仅当 recipe 事件携带时存在） */
-  brewRationale?: BrewRationaleItem[];
+type GenMeta = RecipeSaveOptions;
+type GeneratedSaveResult = Awaited<ReturnType<typeof api.saveRecipe>>;
+interface GeneratedPairSaveResult {
+  original: GeneratedSaveResult;
+  improved: GeneratedSaveResult;
+  improvedName: string;
+}
+
+interface CloudBindCheckpoint {
+  generationId: number;
+  recipeRevision: number;
+  tableId: string;
+  promise: Promise<string | null>;
 }
 
 /** 反馈调参迭代上下文：记录 source={recipeId, feedbackId} 与基础配方，避免上下文丢失 */
@@ -261,6 +273,7 @@ export default function App() {
   const [reasoning, setReasoning] = useState("");
   const [content, setContent] = useState("");
   const [streamError, setStreamError] = useState("");
+  const [generationNotice, setGenerationNotice] = useState("");
   const [research, setResearch] = useState<ResearchInfo>(RESEARCH_IDLE);
   const [review, setReview] = useState<ReviewInfo>(REVIEW_IDLE);
   /** 多候选生成状态机（任务 #106）：进度行 + 优选明细卡的数据源 */
@@ -275,6 +288,8 @@ export default function App() {
 
   // ---- 配方 ----
   const [recipe, setRecipe] = useState<Recipe | null>(null);
+  /** 异步保存完成时读取最新工作台配方，避免闭包把旧历史 ID 回写给已切换或编辑的内容。 */
+  const activeRecipeRef = useRef<Recipe | null>(null);
   /** 生成/载入配方后收起长表单，桌面结果区获得更多横向空间。 */
   const [inputCollapsed, setInputCollapsed] = useState(false);
   /** 豆仓 → 工作台的选豆意图；递增 revision 允许连续选择同一支豆。 */
@@ -289,6 +304,21 @@ export default function App() {
   const recipeRevisionRef = useRef(0);
   const saveRequestIdRef = useRef(0);
   const saveInFlightRef = useRef(false);
+  const generatedOriginalSaveRef = useRef<GeneratedSaveCheckpoint<GeneratedSaveResult> | null>(
+    null,
+  );
+  /** 当前配方的单条保存 Promise；普通保存与云端绑定共用，防跨按钮重复 POST。 */
+  const currentRecipeSaveRef = useRef<GeneratedSaveCheckpoint<GeneratedSaveResult> | null>(null);
+  /** 同一轮双方案只写入一次；完成后的 Promise 也作为重复点击的幂等检查点。 */
+  const generatedPairSaveRef = useRef<GeneratedSaveCheckpoint<GeneratedPairSaveResult> | null>(
+    null,
+  );
+  /** 双方案第二条写入失败时保留已完成的原版写入；只供 saveBoth 重试，云端绑定不得消费。 */
+  const generatedPairOriginalSaveRef = useRef<GeneratedSaveCheckpoint<GeneratedSaveResult> | null>(
+    null,
+  );
+  /** 发布回读与本地历史绑定共用一个进行态，避免重复回调创建两条历史。 */
+  const cloudBindRef = useRef<CloudBindCheckpoint | null>(null);
   /** 云端来源 tableId：从云端导入时记录，发布时存在则走更新（PUT）而非新建 */
   const [cloudTableId, setCloudTableId] = useState<string | null>(null);
   /** 反馈调参上下文（ref：generate 闭包内读取，避免状态过期） */
@@ -325,6 +355,7 @@ export default function App() {
   >(undefined);
   /** 当前工作台采用的方案：编辑器/保存/发布/BLE 均跟随主 recipe 状态 */
   const [activeVariant, setActiveVariant] = useState<"original" | "improved">("original");
+  const activeVariantRef = useRef<"original" | "improved">("original");
   const [savingPair, setSavingPair] = useState(false);
 
   // ---- 时间线播放头 ----
@@ -347,7 +378,9 @@ export default function App() {
   const replaceActiveRecipe = useCallback(
     (next: Recipe) => {
       recipeRevisionRef.current += 1;
+      cloudBindRef.current = null;
       invalidatePendingSave();
+      activeRecipeRef.current = next;
       setRecipe(next);
     },
     [invalidatePendingSave],
@@ -376,6 +409,11 @@ export default function App() {
     (req: GenerateRequest) => {
       abortRef.current?.abort();
       invalidatePendingSave();
+      generatedOriginalSaveRef.current = null;
+      currentRecipeSaveRef.current = null;
+      generatedPairSaveRef.current = null;
+      generatedPairOriginalSaveRef.current = null;
+      cloudBindRef.current = null;
       const controller = new AbortController();
       abortRef.current = controller;
       const genId = ++generationIdRef.current;
@@ -411,6 +449,7 @@ export default function App() {
       setReasoning("");
       setContent("");
       setStreamError("");
+      setGenerationNotice("");
       setResearch(RESEARCH_IDLE);
       setReview(REVIEW_IDLE);
       setCandidates(CANDIDATES_RESET);
@@ -421,6 +460,7 @@ export default function App() {
       setOriginalClamped([]);
       setBrewRationale(undefined);
       setOriginalBrewRationale(undefined);
+      activeVariantRef.current = "original";
       setActiveVariant("original");
       setSavingPair(false);
       lastGenReqRef.current = req;
@@ -585,6 +625,7 @@ export default function App() {
                   // 结果真实到达后再收起输入；请求失败或流中断时输入始终留在眼前。
                   setInputCollapsed(true);
                   setClamped(event.clamped);
+                  setGenerationNotice(event.warning ?? "");
                   // 原版快照落存：供对比卡 diff/切回（任务 #62）
                   setOriginalRecipe(event.recipe);
                   setOriginalClamped(event.clamped);
@@ -592,36 +633,16 @@ export default function App() {
                   const rationale = event.brewRationale?.length ? event.brewRationale : undefined;
                   setBrewRationale(rationale);
                   setOriginalBrewRationale(rationale);
+                  activeVariantRef.current = "original";
                   setActiveVariant("original");
-                  // 生成元数据（任务 #35）：refUrls 来自 recipe 事件，豆原文/调研摘要取自本次请求与 research 聚合
-                  {
-                    const meta: GenMeta = {
-                      ...(event.refUrls?.length ? { refUrls: event.refUrls } : {}),
-                      ...(lastGenReqRef.current?.beans?.trim()
-                        ? { beanSnapshot: lastGenReqRef.current.beans.trim() }
-                        : {}),
-                      ...(researchSummaryRef.current
-                        ? { researchSummary: researchSummaryRef.current }
-                        : {}),
-                      ...(event.reviewFindings?.length
-                        ? { reviewFindings: event.reviewFindings }
-                        : {}),
-                      // 豆库关联落库（任务 #50/#130）：beanMatch 事件匹配的 beanId 优先（粘贴 AI 归类路径），
-                      // 回退到用户手选的 beanId（选豆库豆路径）——修复 AI 归类清空 beanId 后关联断裂根因
-                      ...((matchedBeanIdRef.current ?? lastGenReqRef.current?.beanId)
-                        ? { beanId: (matchedBeanIdRef.current ?? lastGenReqRef.current?.beanId)! }
-                        : {}),
-                      // 烘焙商参考方案原文（任务 #57）：照 beanSnapshot 写法，仅当非空时透传
-                      ...(lastGenReqRef.current?.roasterReference?.trim()
-                        ? { roasterReference: lastGenReqRef.current.roasterReference.trim() }
-                        : {}),
-                      // 方案解读（任务 #72）：照 reviewFindings 写法，仅当非空时透传
-                      ...(event.brewRationale?.length
-                        ? { brewRationale: event.brewRationale }
-                        : {}),
-                    };
-                    setGenMeta(Object.keys(meta).length > 0 ? meta : null);
-                  }
+                  // 明确选择的 beanId 优先，且生成成功后立即写入历史，避免长耗时结果只停留在页面内存。
+                  const generatedMeta = generatedRecipeSaveOptions(
+                    lastGenReqRef.current,
+                    event,
+                    researchSummaryRef.current,
+                    matchedBeanIdRef.current,
+                  );
+                  setGenMeta(generatedMeta);
                   // 反馈调参流程：展示 Diff + 自动保存为新版本（跳过手动保存引导）并回填追溯
                   {
                     const ctx = regenCtxRef.current;
@@ -632,50 +653,56 @@ export default function App() {
                         items: diffRecipes(ctx.base, newRecipe),
                         changeNotes: event.changeNotes,
                       });
+                      const requestId = ++saveRequestIdRef.current;
+                      const recipeRevision = recipeRevisionRef.current;
+                      const name = `${ctx.base.name} · v${ctx.version}`;
+                      saveInFlightRef.current = true;
+                      setSaving(true);
+                      const clientRequestId = crypto.randomUUID();
+                      const saveOptions: RecipeSaveOptions = {
+                        clientRequestId,
+                        name,
+                        parentId: ctx.baseRecipeId,
+                        ...(ctx.feedbackId ? { sourceFeedbackId: ctx.feedbackId } : {}),
+                        ...(event.changeNotes ? { changeNotes: event.changeNotes } : {}),
+                        ...generatedMeta,
+                      };
+                      const savePromise = api.saveRecipe(newRecipe, saveOptions);
+                      generatedOriginalSaveRef.current = {
+                        generationId: genId,
+                        recipeRevision,
+                        promise: savePromise,
+                        recipe: newRecipe,
+                        clientRequestId,
+                        saveOptions,
+                      };
+                      currentRecipeSaveRef.current = {
+                        generationId: genId,
+                        recipeRevision,
+                        promise: savePromise,
+                        recipe: newRecipe,
+                        clientRequestId,
+                        saveOptions,
+                      };
                       void (async () => {
-                        const name = `${ctx.base.name} · v${ctx.version}`;
                         try {
-                          const res = await api.saveRecipe(newRecipe, {
-                            name,
-                            parentId: ctx.baseRecipeId,
-                            ...(ctx.feedbackId ? { sourceFeedbackId: ctx.feedbackId } : {}),
-                            ...(event.changeNotes ? { changeNotes: event.changeNotes } : {}),
-                            // 调研/豆信息快照同步落库（任务 #35）
-                            ...(event.refUrls?.length ? { refUrls: event.refUrls } : {}),
-                            ...(lastGenReqRef.current?.beans?.trim()
-                              ? { beanSnapshot: lastGenReqRef.current.beans.trim() }
-                              : {}),
-                            ...(researchSummaryRef.current
-                              ? { researchSummary: researchSummaryRef.current }
-                              : {}),
-                            // 审查遗留 findings 同步落库（任务 #36）
-                            ...(event.reviewFindings?.length
-                              ? { reviewFindings: event.reviewFindings }
-                              : {}),
-                            // 豆库关联落库（任务 #50/#130）：beanMatch 优先，回退到手选 beanId
-                            ...((matchedBeanIdRef.current ?? lastGenReqRef.current?.beanId)
-                              ? {
-                                  beanId: (matchedBeanIdRef.current ??
-                                    lastGenReqRef.current?.beanId)!,
-                                }
-                              : {}),
-                            // 烘焙商参考方案原文同步落库（任务 #57）
-                            ...(lastGenReqRef.current?.roasterReference?.trim()
-                              ? { roasterReference: lastGenReqRef.current.roasterReference.trim() }
-                              : {}),
-                            // 方案解读同步落库（任务 #72）
-                            ...(event.brewRationale?.length
-                              ? { brewRationale: event.brewRationale }
-                              : {}),
-                          });
-                          if (stale()) return;
+                          const res = await savePromise;
+                          const isCurrent = () =>
+                            !stale() &&
+                            saveCompletionIsCurrent(
+                              requestId,
+                              recipeRevision,
+                              saveRequestIdRef.current,
+                              recipeRevisionRef.current,
+                            );
+                          if (!isCurrent()) return;
                           // 双保险回填：POST 时已自动回填，PATCH 兼容 feedbackId 晚到/丢失场景
                           if (ctx.feedbackId) {
                             await api
                               .patchFeedbackResulting(ctx.baseRecipeId, ctx.feedbackId, res.id)
                               .catch(() => undefined);
                           }
-                          if (stale()) return;
+                          if (!isCurrent()) return;
                           const v = res.version ?? ctx.version;
                           setTuningDiff((d) => (d ? { ...d, version: v } : d));
                           setSavedAt(Date.now()); // 已落库 → 跳过手动保存引导
@@ -685,10 +712,75 @@ export default function App() {
                           );
                           setSaveRevision((r) => r + 1);
                         } catch (e) {
-                          if (stale()) return;
+                          if (
+                            stale() ||
+                            !saveCompletionIsCurrent(
+                              requestId,
+                              recipeRevision,
+                              saveRequestIdRef.current,
+                              recipeRevisionRef.current,
+                            )
+                          )
+                            return;
                           setStreamError(`调参版本自动保存失败：${(e as Error).message}`);
+                        } finally {
+                          if (saveRequestIdRef.current === requestId) {
+                            saveInFlightRef.current = false;
+                            setSaving(false);
+                          }
                         }
                       })();
+                    } else {
+                      const requestId = ++saveRequestIdRef.current;
+                      const recipeRevision = recipeRevisionRef.current;
+                      saveInFlightRef.current = true;
+                      setSaving(true);
+                      const clientRequestId = crypto.randomUUID();
+                      const saveOptions: RecipeSaveOptions = {
+                        ...generatedMeta,
+                        clientRequestId,
+                      };
+                      const savePromise = api.saveRecipe(event.recipe, saveOptions);
+                      generatedOriginalSaveRef.current = {
+                        generationId: genId,
+                        recipeRevision,
+                        promise: savePromise,
+                        recipe: event.recipe,
+                        clientRequestId,
+                        saveOptions,
+                      };
+                      currentRecipeSaveRef.current = {
+                        generationId: genId,
+                        recipeRevision,
+                        promise: savePromise,
+                        recipe: event.recipe,
+                        clientRequestId,
+                        saveOptions,
+                      };
+                      void savePromise
+                        .then((saved) => {
+                          if (
+                            stale() ||
+                            requestId !== saveRequestIdRef.current ||
+                            recipeRevision !== recipeRevisionRef.current
+                          )
+                            return;
+                          setSavedAt(Date.now());
+                          setLocalRecipeId(saved.id);
+                          setAutoSavedNote("已自动保存到冲煮历史");
+                          setSaveRevision((revision) => revision + 1);
+                        })
+                        .catch((reason) => {
+                          if (stale() || requestId !== saveRequestIdRef.current) return;
+                          setStreamError(
+                            `配方已生成，自动保存未完成：${(reason as Error).message}`,
+                          );
+                        })
+                        .finally(() => {
+                          if (requestId !== saveRequestIdRef.current) return;
+                          saveInFlightRef.current = false;
+                          setSaving(false);
+                        });
                     }
                   }
                   break;
@@ -720,6 +812,7 @@ export default function App() {
   const saveRecipe = useCallback(async () => {
     if (!recipe || saveInFlightRef.current) return;
     const requestId = ++saveRequestIdRef.current;
+    const generationId = generationIdRef.current;
     const recipeRevision = recipeRevisionRef.current;
     const isCurrentSave = () =>
       saveCompletionIsCurrent(
@@ -731,20 +824,97 @@ export default function App() {
     saveInFlightRef.current = true;
     setSaving(true);
     try {
-      const res = await api.saveRecipe(recipe, {
+      const pairVariant =
+        originalRecipe && variant.improved
+          ? savedPairVariantForRecipe(
+              recipe,
+              originalRecipe,
+              variant.improved.recipe,
+              activeVariant,
+            )
+          : null;
+      const pendingPairSave = pairVariant
+        ? reusableGeneratedSave(generatedPairSaveRef.current, generationId)
+        : null;
+      if (pendingPairSave && pairVariant) {
+        try {
+          const savedPair = await pendingPairSave;
+          if (!isCurrentSave()) return;
+          setSavedAt(Date.now());
+          setLocalRecipeId(savedPair[pairVariant].id);
+          setAutoSavedNote("当前方案已保存在双方案历史中");
+          return;
+        } catch {
+          // 双方案写入失败后继续保存当前工作台快照。
+        }
+      }
+
+      const pendingSnapshotCheckpoint =
+        reusableGeneratedSaveCheckpointForRecipe(
+          currentRecipeSaveRef.current,
+          generationId,
+          recipe,
+        ) ??
+        reusableGeneratedSaveCheckpointForRecipe(
+          generatedOriginalSaveRef.current,
+          generationId,
+          recipe,
+        );
+      if (pendingSnapshotCheckpoint) {
+        try {
+          const saved = await pendingSnapshotCheckpoint.promise;
+          if (!isCurrentSave()) return;
+          setSavedAt(Date.now());
+          setLocalRecipeId(saved.id);
+          setAutoSavedNote("当前方案已在冲煮历史中");
+          return;
+        } catch {
+          // 旧写入失败后继续保存当前工作台快照。
+        }
+      }
+
+      const cloudCheckpoint = cloudBindRef.current;
+      if (
+        cloudCheckpoint &&
+        cloudCheckpoint.generationId === generationId &&
+        cloudCheckpoint.recipeRevision === recipeRevision
+      ) {
+        try {
+          const boundId = await cloudCheckpoint.promise;
+          if (!isCurrentSave()) return;
+          if (boundId) {
+            setSavedAt(Date.now());
+            setLocalRecipeId(boundId);
+            return;
+          }
+        } catch {
+          // 云端绑定失败后继续走一次本地保存。
+        }
+      }
+
+      const clientRequestId = pendingSnapshotCheckpoint?.clientRequestId ?? crypto.randomUUID();
+      const saveOptions: RecipeSaveOptions = pendingSnapshotCheckpoint?.saveOptions ?? {
+        clientRequestId,
         ...(genMeta?.refUrls?.length ? { refUrls: genMeta.refUrls } : {}),
         ...(genMeta?.beanSnapshot ? { beanSnapshot: genMeta.beanSnapshot } : {}),
         ...(genMeta?.researchSummary ? { researchSummary: genMeta.researchSummary } : {}),
         ...(genMeta?.reviewFindings?.length ? { reviewFindings: genMeta.reviewFindings } : {}),
-        // 豆库关联落库（任务 #50）：仅当本次生成已选豆库豆时非空
         ...(genMeta?.beanId ? { beanId: genMeta.beanId } : {}),
-        // 烘焙商参考方案原文（任务 #57）：仅当本次生成非空时透传
         ...(genMeta?.roasterReference ? { roasterReference: genMeta.roasterReference } : {}),
-        // 方案解读（任务 #72）：照 changeNotes 保存模式，仅当非空时透传持久化
         ...(genMeta?.brewRationale?.length ? { brewRationale: genMeta.brewRationale } : {}),
-        // 双方案对比（任务 #62）：单独保存时标记当前采用方案的 variant（行为不变，仅多一个标识字段）
         variant: activeVariant,
-      });
+      };
+      const retryOptions = { ...saveOptions, clientRequestId };
+      const savePromise = api.saveRecipe(recipe, retryOptions);
+      currentRecipeSaveRef.current = {
+        generationId,
+        recipeRevision,
+        promise: savePromise,
+        recipe,
+        clientRequestId,
+        saveOptions: retryOptions,
+      };
+      const res = await savePromise;
       if (!isCurrentSave()) return;
       if (res.warning) console.info(`[xBloom] 保存提示：${res.warning}`);
       setSavedAt(Date.now());
@@ -759,7 +929,7 @@ export default function App() {
         setSaving(false);
       }
     }
-  }, [recipe, genMeta, activeVariant]);
+  }, [activeVariant, genMeta, originalRecipe, recipe, variant.improved]);
 
   /** 采用改进版（任务 #62）：improved 载入主 recipe 状态，编辑器/保存/发布/BLE 全走现有链路 */
   const adoptImproved = useCallback(() => {
@@ -770,6 +940,7 @@ export default function App() {
     setBrewRationale(
       variant.improved.brewRationale?.length ? variant.improved.brewRationale : undefined,
     );
+    activeVariantRef.current = "improved";
     setActiveVariant("improved");
     setSavedAt(undefined); // 新方案未落库，恢复保存引导
     setLocalRecipeId(null);
@@ -782,6 +953,7 @@ export default function App() {
     replaceActiveRecipe(originalRecipe);
     setClamped(originalClamped);
     setBrewRationale(originalBrewRationale);
+    activeVariantRef.current = "original";
     setActiveVariant("original");
     setSavedAt(undefined);
     setLocalRecipeId(null);
@@ -790,55 +962,194 @@ export default function App() {
 
   /** 保存两个方案（任务 #62）：先存原版（variant:"original"），成功后存改进版（name 附后缀、pairId=原版 id） */
   const saveBoth = useCallback(async () => {
-    if (!originalRecipe || !variant.improved || savingPair) return;
+    if (!originalRecipe || !variant.improved || saveInFlightRef.current) return;
+    const improvedSnapshot = variant.improved;
     const genId = generationIdRef.current;
+    const recipeRevision = recipeRevisionRef.current;
+    const saveRequestId = ++saveRequestIdRef.current;
+    saveInFlightRef.current = true;
+    setSaving(true);
     setSavingPair(true);
     try {
-      // 共享透传：beanId/beanSnapshot/researchSummary/roasterReference/refUrls 等既有元数据
-      const shared = {
-        ...(genMeta?.beanSnapshot ? { beanSnapshot: genMeta.beanSnapshot } : {}),
-        ...(genMeta?.researchSummary ? { researchSummary: genMeta.researchSummary } : {}),
-        ...(genMeta?.beanId ? { beanId: genMeta.beanId } : {}),
-        ...(genMeta?.roasterReference ? { roasterReference: genMeta.roasterReference } : {}),
-      };
-      const resOriginal = await api.saveRecipe(originalRecipe, {
-        ...shared,
-        ...(genMeta?.refUrls?.length ? { refUrls: genMeta.refUrls } : {}),
-        ...(genMeta?.reviewFindings?.length ? { reviewFindings: genMeta.reviewFindings } : {}),
-        // 方案解读随原版落库（任务 #72）
-        ...(genMeta?.brewRationale?.length ? { brewRationale: genMeta.brewRationale } : {}),
-        variant: "original",
-      });
-      if (generationIdRef.current !== genId) return; // 已发起新一轮生成，弃置本次保存
-      const improvedName = improvedRecipeName(originalRecipe.name);
-      const resImproved = await api.saveRecipe(variant.improved.recipe, {
-        name: improvedName,
-        ...shared,
-        ...(variant.improved.refUrls?.length ? { refUrls: variant.improved.refUrls } : {}),
-        ...(variant.improved.reviewFindings?.length
-          ? { reviewFindings: variant.improved.reviewFindings }
-          : {}),
-        // 改进版方案解读同步落库（任务 #73）：与原版条目各自携带自己的 brewRationale
-        ...(variant.improved.brewRationale?.length
-          ? { brewRationale: variant.improved.brewRationale }
-          : {}),
-        variant: "improved",
-        pairId: resOriginal.id,
-      });
-      if (generationIdRef.current !== genId) return;
+      let pairCheckpoint = generatedPairSaveRef.current;
+      let pairSave = reusableGeneratedSave(generatedPairSaveRef.current, genId);
+      if (!pairSave) {
+        pairSave = (async (): Promise<GeneratedPairSaveResult> => {
+          // 共享透传：beanId/beanSnapshot/researchSummary/roasterReference/refUrls 等既有元数据
+          const shared = {
+            ...(genMeta?.beanSnapshot ? { beanSnapshot: genMeta.beanSnapshot } : {}),
+            ...(genMeta?.researchSummary ? { researchSummary: genMeta.researchSummary } : {}),
+            ...(genMeta?.beanId ? { beanId: genMeta.beanId } : {}),
+            ...(genMeta?.roasterReference ? { roasterReference: genMeta.roasterReference } : {}),
+          };
+          let resOriginal: GeneratedSaveResult | null = null;
+          const originalCheckpoint =
+            reusableGeneratedSaveCheckpointForRecipe(
+              generatedPairOriginalSaveRef.current,
+              genId,
+              originalRecipe,
+            ) ??
+            reusableGeneratedSaveCheckpointForRecipe(
+              generatedOriginalSaveRef.current,
+              genId,
+              originalRecipe,
+            ) ??
+            reusableGeneratedSaveCheckpointForRecipe(
+              currentRecipeSaveRef.current,
+              genId,
+              originalRecipe,
+            );
+          let originalClientRequestId = originalCheckpoint?.clientRequestId;
+          let originalSaveOptions = originalCheckpoint?.saveOptions;
+          if (originalCheckpoint) {
+            try {
+              resOriginal = await originalCheckpoint.promise;
+            } catch {
+              // The initial auto-save failed; the explicit pair action retries it once below.
+            }
+          }
+          if (!resOriginal && activeVariant === "original" && localRecipeId) {
+            resOriginal = { ok: true, id: localRecipeId };
+          }
+          if (!resOriginal) {
+            originalClientRequestId ??= crypto.randomUUID();
+            originalSaveOptions ??= {
+              clientRequestId: originalClientRequestId,
+              ...shared,
+              ...(genMeta?.refUrls?.length ? { refUrls: genMeta.refUrls } : {}),
+              ...(genMeta?.reviewFindings?.length
+                ? { reviewFindings: genMeta.reviewFindings }
+                : {}),
+              ...(genMeta?.brewRationale?.length ? { brewRationale: genMeta.brewRationale } : {}),
+              variant: "original",
+            };
+            const originalRetryOptions = {
+              ...originalSaveOptions,
+              clientRequestId: originalClientRequestId,
+            };
+            originalSaveOptions = originalRetryOptions;
+            const originalRetrySave = api.saveRecipe(originalRecipe, originalRetryOptions);
+            generatedPairOriginalSaveRef.current = {
+              generationId: genId,
+              recipeRevision,
+              promise: originalRetrySave,
+              recipe: originalRecipe,
+              clientRequestId: originalClientRequestId,
+              saveOptions: originalRetryOptions,
+            };
+            resOriginal = await originalRetrySave;
+          }
+          // Preserve the successful first half across an improved-save retry.
+          generatedPairOriginalSaveRef.current = {
+            generationId: genId,
+            recipeRevision,
+            promise: Promise.resolve(resOriginal),
+            recipe: originalRecipe,
+            ...(originalClientRequestId ? { clientRequestId: originalClientRequestId } : {}),
+            ...(originalSaveOptions ? { saveOptions: originalSaveOptions } : {}),
+          };
+          if (generationIdRef.current !== genId) throw new Error("保存上下文已更新");
+          const improvedName = improvedRecipeName(originalRecipe.name);
+          let resImproved: GeneratedSaveResult | null = null;
+          const improvedCheckpoint = reusableGeneratedSaveCheckpointForRecipe(
+            currentRecipeSaveRef.current,
+            genId,
+            improvedSnapshot.recipe,
+          );
+          let improvedClientRequestId = improvedCheckpoint?.clientRequestId;
+          let improvedSaveOptions = improvedCheckpoint?.saveOptions;
+          if (improvedCheckpoint) {
+            try {
+              resImproved = await improvedCheckpoint.promise;
+            } catch {
+              // A failed standalone save falls through to the paired write below.
+            }
+          }
+          if (
+            !resImproved &&
+            activeVariantRef.current === "improved" &&
+            localRecipeId &&
+            sameRecipeSnapshot(activeRecipeRef.current, improvedSnapshot.recipe)
+          ) {
+            resImproved = { ok: true, id: localRecipeId };
+          }
+          if (!resImproved) {
+            improvedClientRequestId ??= crypto.randomUUID();
+            improvedSaveOptions ??= {
+              clientRequestId: improvedClientRequestId,
+              name: improvedName,
+              ...shared,
+              ...(improvedSnapshot.refUrls?.length ? { refUrls: improvedSnapshot.refUrls } : {}),
+              ...(improvedSnapshot.reviewFindings?.length
+                ? { reviewFindings: improvedSnapshot.reviewFindings }
+                : {}),
+              ...(improvedSnapshot.brewRationale?.length
+                ? { brewRationale: improvedSnapshot.brewRationale }
+                : {}),
+              variant: "improved",
+              pairId: resOriginal.id,
+            };
+            const improvedRetryOptions = {
+              ...improvedSaveOptions,
+              clientRequestId: improvedClientRequestId,
+            };
+            const improvedRetrySave = api.saveRecipe(improvedSnapshot.recipe, improvedRetryOptions);
+            currentRecipeSaveRef.current = {
+              generationId: genId,
+              recipeRevision,
+              promise: improvedRetrySave,
+              recipe: improvedSnapshot.recipe,
+              clientRequestId: improvedClientRequestId,
+              saveOptions: improvedRetryOptions,
+            };
+            resImproved = await improvedRetrySave;
+          }
+          await api.bindRecipePair(resImproved.id, resOriginal.id, improvedName);
+          return { original: resOriginal, improved: resImproved, improvedName };
+        })();
+        pairCheckpoint = { generationId: genId, recipeRevision, promise: pairSave };
+        generatedPairSaveRef.current = pairCheckpoint;
+        void pairSave.catch(() => {
+          if (generatedPairSaveRef.current?.promise === pairSave) {
+            generatedPairSaveRef.current = null;
+          }
+        });
+      }
+      const { original: resOriginal, improved: resImproved, improvedName } = await pairSave;
+      if (!pairCheckpoint || generationIdRef.current !== genId) return;
+      const savedVariant = savedPairVariantForRecipe(
+        activeRecipeRef.current,
+        originalRecipe,
+        improvedSnapshot.recipe,
+        activeVariantRef.current,
+      );
+      if (!savedVariant) return;
       setSavedAt(Date.now());
-      setLocalRecipeId(activeVariant === "improved" ? resImproved.id : resOriginal.id);
+      setLocalRecipeId(savedVariant === "improved" ? resImproved.id : resOriginal.id);
       setAutoSavedNote(
         `已保存双方案：「${originalRecipe.name}」与「${improvedName}」，可在冲煮历史中查看`,
       );
       setSaveRevision((r) => r + 1);
     } catch (e) {
       if (generationIdRef.current !== genId) return;
+      if (
+        !savedPairVariantForRecipe(
+          activeRecipeRef.current,
+          originalRecipe,
+          improvedSnapshot.recipe,
+          activeVariantRef.current,
+        )
+      )
+        return;
       setStreamError(`保存失败：${(e as Error).message}`);
     } finally {
       if (generationIdRef.current === genId) setSavingPair(false);
+      if (saveRequestIdRef.current === saveRequestId) {
+        saveInFlightRef.current = false;
+        setSaving(false);
+      }
     }
-  }, [originalRecipe, variant.improved, genMeta, savingPair, activeVariant]);
+  }, [originalRecipe, variant.improved, genMeta, activeVariant, localRecipeId]);
 
   const loadHistoryRecipe = useCallback(
     (r: Recipe, tableId?: string, storedId?: string) => {
@@ -846,10 +1157,16 @@ export default function App() {
       abortRef.current?.abort();
       abortRef.current = null;
       generationIdRef.current += 1;
+      generatedOriginalSaveRef.current = null;
+      currentRecipeSaveRef.current = null;
+      generatedPairSaveRef.current = null;
+      generatedPairOriginalSaveRef.current = null;
+      cloudBindRef.current = null;
       setGenerating(false);
       setReasoning("");
       setContent("");
       setStreamError("");
+      setGenerationNotice("");
       setResearch(RESEARCH_IDLE);
       setReview(REVIEW_IDLE);
       setCandidates(CANDIDATES_RESET);
@@ -873,6 +1190,7 @@ export default function App() {
       setOriginalClamped([]);
       setBrewRationale(undefined);
       setOriginalBrewRationale(undefined);
+      activeVariantRef.current = "original";
       setActiveVariant("original");
       setPlayTime(0);
       setPlayheadOn(false);
@@ -890,27 +1208,162 @@ export default function App() {
 
   const bindVerifiedCloudRecipe = useCallback(
     async (tableId: string) => {
-      if (localRecipeId) {
-        await api.bindRecipeCloud(localRecipeId, tableId);
-      } else if (recipe) {
-        const saved = await api.saveRecipe(recipe, {
-          ...(genMeta?.refUrls?.length ? { refUrls: genMeta.refUrls } : {}),
-          ...(genMeta?.beanSnapshot ? { beanSnapshot: genMeta.beanSnapshot } : {}),
-          ...(genMeta?.researchSummary ? { researchSummary: genMeta.researchSummary } : {}),
-          ...(genMeta?.reviewFindings?.length ? { reviewFindings: genMeta.reviewFindings } : {}),
-          ...(genMeta?.beanId ? { beanId: genMeta.beanId } : {}),
-          ...(genMeta?.roasterReference ? { roasterReference: genMeta.roasterReference } : {}),
-          ...(genMeta?.brewRationale?.length ? { brewRationale: genMeta.brewRationale } : {}),
-          variant: activeVariant,
-          cloudTableId: tableId,
-        });
-        setLocalRecipeId(saved.id);
-        setSavedAt(Date.now());
+      const generationId = generationIdRef.current;
+      const recipeRevision = recipeRevisionRef.current;
+      const recipeSnapshot = recipe;
+      const localRecipeIdSnapshot = localRecipeId;
+      const genMetaSnapshot = genMeta;
+      const activeVariantSnapshot = activeVariant;
+      const originalRecipeSnapshot = originalRecipe;
+      const improvedRecipeSnapshot = variant.improved?.recipe ?? null;
+      const isCurrent = () =>
+        generatedRecipeIsCurrent(
+          generationId,
+          recipeRevision,
+          generationIdRef.current,
+          recipeRevisionRef.current,
+        );
+
+      // Same-table callbacks share one result. Different table IDs are serialized so
+      // each confirmed cloud record is bound once without racing a second history POST.
+      let priorRecipeId: string | null = null;
+      let preceding = cloudBindRef.current;
+      while (
+        preceding &&
+        preceding.generationId === generationId &&
+        preceding.recipeRevision === recipeRevision
+      ) {
+        if (preceding.tableId === tableId) {
+          await preceding.promise;
+          return;
+        }
+        try {
+          priorRecipeId = (await preceding.promise) ?? priorRecipeId;
+        } catch {
+          // The new callback may retry after the failed predecessor below.
+        }
+        if (!isCurrent()) return;
+        const latest = cloudBindRef.current;
+        if (latest === preceding) break;
+        preceding = latest;
       }
-      setCloudTableId(tableId);
-      setSaveRevision((revision) => revision + 1);
+
+      let bindSaveRequestId = saveInFlightRef.current ? null : ++saveRequestIdRef.current;
+      if (bindSaveRequestId !== null) {
+        saveInFlightRef.current = true;
+        setSaving(true);
+      }
+      const bindPromise = (async (): Promise<string | null> => {
+        let recipeId = priorRecipeId ?? localRecipeIdSnapshot;
+        const pendingPairSave = reusableGeneratedSave(generatedPairSaveRef.current, generationId);
+        const pairVariant =
+          recipeSnapshot && originalRecipeSnapshot && improvedRecipeSnapshot
+            ? savedPairVariantForRecipe(
+                recipeSnapshot,
+                originalRecipeSnapshot,
+                improvedRecipeSnapshot,
+                activeVariantSnapshot,
+              )
+            : null;
+        if (pendingPairSave && pairVariant) {
+          try {
+            const savedPair = await pendingPairSave;
+            recipeId = savedPair[pairVariant].id;
+          } catch {
+            // A failed pair save falls through to the exact active-recipe save below.
+          }
+        }
+        if (!isCurrent()) return null;
+        const pendingGeneratedCheckpoint = recipeSnapshot
+          ? (reusableGeneratedSaveCheckpointForRecipe(
+              currentRecipeSaveRef.current,
+              generationId,
+              recipeSnapshot,
+            ) ??
+            reusableGeneratedSaveCheckpointForRecipe(
+              generatedOriginalSaveRef.current,
+              generationId,
+              recipeSnapshot,
+            ))
+          : null;
+        if (pendingGeneratedCheckpoint) {
+          try {
+            recipeId = (await pendingGeneratedCheckpoint.promise).id;
+          } catch {
+            // A failed auto-save falls through to one save carrying cloudTableId.
+          }
+        }
+        if (!isCurrent()) return null;
+        // 上游单配方/双方案保存完成后，继续持有写锁直到云端绑定落定。
+        if (bindSaveRequestId === null) {
+          bindSaveRequestId = ++saveRequestIdRef.current;
+          saveInFlightRef.current = true;
+          setSaving(true);
+        }
+        if (!recipeId && recipeSnapshot) {
+          const clientRequestId =
+            pendingGeneratedCheckpoint?.clientRequestId ?? crypto.randomUUID();
+          const saveOptions: RecipeSaveOptions = pendingGeneratedCheckpoint?.saveOptions ?? {
+            clientRequestId,
+            ...(genMetaSnapshot?.refUrls?.length ? { refUrls: genMetaSnapshot.refUrls } : {}),
+            ...(genMetaSnapshot?.beanSnapshot
+              ? { beanSnapshot: genMetaSnapshot.beanSnapshot }
+              : {}),
+            ...(genMetaSnapshot?.researchSummary
+              ? { researchSummary: genMetaSnapshot.researchSummary }
+              : {}),
+            ...(genMetaSnapshot?.reviewFindings?.length
+              ? { reviewFindings: genMetaSnapshot.reviewFindings }
+              : {}),
+            ...(genMetaSnapshot?.beanId ? { beanId: genMetaSnapshot.beanId } : {}),
+            ...(genMetaSnapshot?.roasterReference
+              ? { roasterReference: genMetaSnapshot.roasterReference }
+              : {}),
+            ...(genMetaSnapshot?.brewRationale?.length
+              ? { brewRationale: genMetaSnapshot.brewRationale }
+              : {}),
+            variant: activeVariantSnapshot,
+          };
+          const retryOptions = { ...saveOptions, clientRequestId };
+          const savePromise = api.saveRecipe(recipeSnapshot, retryOptions);
+          currentRecipeSaveRef.current = {
+            generationId,
+            recipeRevision,
+            promise: savePromise,
+            recipe: recipeSnapshot,
+            clientRequestId,
+            saveOptions: retryOptions,
+          };
+          const saved = await savePromise;
+          if (!isCurrent()) return null;
+          recipeId = saved.id;
+          setLocalRecipeId(recipeId);
+          setSavedAt(Date.now());
+        } else if (!recipeId) {
+          return null;
+        }
+        if (!isCurrent() || !recipeId) return null;
+        await api.bindRecipeCloud(recipeId, tableId);
+        if (!isCurrent()) return null;
+        setLocalRecipeId(recipeId);
+        setCloudTableId(tableId);
+        setSaveRevision((revision) => revision + 1);
+        return recipeId;
+      })();
+      cloudBindRef.current = { generationId, recipeRevision, tableId, promise: bindPromise };
+      try {
+        await bindPromise;
+      } catch (error) {
+        if (cloudBindRef.current?.promise === bindPromise) cloudBindRef.current = null;
+        throw error;
+      } finally {
+        if (bindSaveRequestId !== null && saveRequestIdRef.current === bindSaveRequestId) {
+          saveInFlightRef.current = false;
+          setSaving(false);
+        }
+      }
     },
-    [activeVariant, genMeta, localRecipeId, recipe],
+    [activeVariant, genMeta, localRecipeId, originalRecipe, recipe, variant.improved],
   );
 
   const deleteHistory = useCallback(async (id: string) => {
@@ -982,7 +1435,7 @@ export default function App() {
   const showStreamPanel =
     !recipe ||
     generating ||
-    Boolean(reasoning || content || streamError || winnerJson) ||
+    Boolean(reasoning || content || streamError || generationNotice || winnerJson) ||
     research.phase !== "idle" ||
     review.phase !== "idle" ||
     candidates.phase !== "idle";
@@ -1075,6 +1528,7 @@ export default function App() {
                 content={content}
                 streaming={generating}
                 error={streamError}
+                notice={generationNotice}
                 research={research}
                 review={review}
                 candidatesProgress={
@@ -1114,7 +1568,7 @@ export default function App() {
                   failMessage={variant.message}
                   buffer={variant.buffer}
                   activeVariant={activeVariant}
-                  savingPair={savingPair}
+                  savingPair={savingPair || saving}
                   theme={theme}
                   onAdoptImproved={adoptImproved}
                   onRevertOriginal={revertOriginal}

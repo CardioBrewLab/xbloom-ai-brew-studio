@@ -5,7 +5,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
-import { detectModelProvider, type ModelProvider } from "@xbloom/shared/model-provider";
+import { detectModelProvider, type ModelProvider } from "../../shared/dist/model-provider.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const envPath = path.resolve(here, "../../.env");
@@ -93,7 +93,7 @@ export interface AppConfig {
   generateCandidates: number;
   /** 候选采用分数阈值（任务 #131）：低于此分的获胜候选触发重调研，缺省 70 */
   candidateScoreThreshold: number;
-  /** 调研重试最大轮数（任务 #131）：低分/不一致时换源重调研，缺省 2 */
+  /** 调研重试最大轮数（任务 #131）：低分/不一致时换源重调研，缺省 1 */
   researchRetryMaxRounds: number;
 }
 
@@ -125,5 +125,5 @@ export const config: AppConfig = {
   firecrawlEnabled: (process.env.FIRECRAWL_ENABLED ?? "true").trim().toLowerCase() !== "false",
   generateCandidates: parseGenerateCandidates(process.env.GENERATE_CANDIDATES),
   candidateScoreThreshold: num(process.env.CANDIDATE_SCORE_THRESHOLD, 70),
-  researchRetryMaxRounds: num(process.env.RESEARCH_RETRY_MAX_ROUNDS, 2),
+  researchRetryMaxRounds: num(process.env.RESEARCH_RETRY_MAX_ROUNDS, 1),
 };

@@ -95,30 +95,10 @@ export const CANDIDATES_IDLE: CandidatesState = {
   results: [],
 };
 
-/** 线上 candidates 事件扩展形态（任务 #120；api.ts 类型保持向后兼容，此处局部扩展） */
-type WireCandidatesEvent =
-  | { type: "candidates"; stage: "start"; n: number; round?: number }
-  | {
-      type: "candidates";
-      stage: "progress";
-      done: number;
-      total: number;
-      result?: CandidateResultEntry;
-      round?: number;
-    }
-  | {
-      type: "candidates";
-      stage: "picked";
-      winner: number;
-      scores: CandidateScoreSummary[];
-      results?: CandidateResultEntry[];
-      round?: number;
-    };
-
 /** candidates / recipe(candidateScore) 事件 → 新状态；无关事件原样返回 */
 export function reduceCandidatesEvent(state: CandidatesState, ev: GenerateEvent): CandidatesState {
   if (ev.type === "candidates") {
-    const w = ev as unknown as WireCandidatesEvent;
+    const w = ev;
     if (w.stage === "start") {
       return {
         phase: "running",
@@ -144,10 +124,10 @@ export function reduceCandidatesEvent(state: CandidatesState, ev: GenerateEvent)
       results: w.results && w.results.length > 0 ? w.results : state.results,
       // 兜底：缺失 start 的直接 picked（测试/异常序列）时从 results/scores 推断 total
       total:
-        state.total > 0
-          ? state.total
-          : (w.results?.length ?? 0) > 0
-            ? w.results!.length
+        (w.results?.length ?? 0) > 0
+          ? w.results!.length
+          : state.total > 0
+            ? state.total
             : w.scores.length,
       ...(w.round ? { round: w.round } : {}),
     };
@@ -164,6 +144,9 @@ export function reduceCandidatesEvent(state: CandidatesState, ev: GenerateEvent)
  */
 export function candidatesProgressText(state: CandidatesState): string {
   if (state.phase !== "running" || state.total <= 0) return "";
+  if ((state.round ?? 0) > 0) {
+    return `第 ${(state.round ?? 0) + 1} 轮正在补发 ${state.total} 份方案…(${state.done}/${state.total})`;
+  }
   return `正在并行生成 ${state.total} 份方案…(${state.done}/${state.total})`;
 }
 

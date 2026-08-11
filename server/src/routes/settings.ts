@@ -11,7 +11,7 @@ import {
   testModelConnection,
   type FetchLike,
   type ModelConnection,
-} from "@xbloom/shared/model-provider";
+} from "../../../shared/dist/model-provider.js";
 import { config } from "../config.js";
 import {
   currentLlmSettings,

@@ -80,10 +80,10 @@ Windows launcher 使用以下默认值：
 | `LLM_REASONING_EFFORT`             | 本地生成路径使用的 reasoning 策略            | `high`                       |
 | `LLM_TEMPERATURE`                  | 生成 temperature                             | `0.3`                        |
 | `LLM_REQUEST_TIMEOUT_MS`           | 单次模型请求截止时间                         | `120000`                     |
-| `GENERATION_TIMEOUT_MS`            | 整体生成截止时间                             | `600000`                     |
+| `GENERATION_TIMEOUT_MS`            | 整体生成截止时间                             | `300000`                     |
 | `GENERATE_CANDIDATES`              | 旧 API 的候选数量；桌面模式有自己的策略      | `3`                          |
 | `CANDIDATE_SCORE_THRESHOLD`        | 候选评分阈值                                 | `70`                         |
-| `RESEARCH_RETRY_MAX_ROUNDS`        | 调研重试轮数                                 | `2`                          |
+| `RESEARCH_RETRY_MAX_ROUNDS`        | 调研重试轮数                                 | `1`                          |
 | `XBLOOM_REGION`                    | xBloom API 区域，`global` 或 `cn`            | `global`                     |
 | `XBLOOM_EMAIL` / `XBLOOM_PASSWORD` | 可选本地 xBloom 自动登录                     | 留空或用户自己的值           |
 | `HTTPS_PROXY` / `ALL_PROXY`        | 可选出站 proxy                               | 留空或 proxy URL             |

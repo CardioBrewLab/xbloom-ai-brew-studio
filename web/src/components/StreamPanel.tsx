@@ -43,6 +43,7 @@ export interface StreamPanelProps {
   content: string;
   streaming: boolean;
   error?: string;
+  notice?: string;
   research?: StreamResearch;
   review?: StreamReview;
   /** 多候选生成进度文案（任务 #106：如「正在并行生成 3 份方案…(1/3)」）；空串不渲染 */
@@ -58,6 +59,7 @@ export default function StreamPanel({
   content,
   streaming,
   error,
+  notice,
   research,
   review,
   candidatesProgress,
@@ -81,6 +83,7 @@ export default function StreamPanel({
     !reasoning &&
     !content &&
     !error &&
+    !notice &&
     !candidatesProgress &&
     !recipeJson &&
     (!research || research.phase === "idle") &&
@@ -163,6 +166,12 @@ export default function StreamPanel({
         {error && (
           <div className="animate-fade-up rounded-lg border border-[var(--bad)]/50 bg-[color-mix(in_srgb,var(--bad)_10%,transparent)] px-4 py-3 text-sm text-[var(--bad)]">
             ⚠ {error}
+          </div>
+        )}
+
+        {notice && (
+          <div className="animate-fade-up rounded-lg border border-[var(--acc-line)] bg-[var(--acc-soft)] px-4 py-3 text-sm text-[var(--tx-2)]">
+            {notice}
           </div>
         )}
 

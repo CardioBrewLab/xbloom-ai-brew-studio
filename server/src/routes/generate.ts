@@ -107,6 +107,9 @@ function candidateFailReasonText(
 const CANDIDATE_TRANSPORT_RETRIES = 1;
 const CANDIDATE_RETRY_DELAY_MS = 350;
 const CANDIDATE_DIVERSITY_RETRIES = 2;
+const CANDIDATE_MODEL_TIMEOUT_MS = 60_000;
+const CANDIDATE_CHAIN_BUDGET_MS = 90_000;
+const CANDIDATE_DIVERSITY_BUDGET_MS = 35_000;
 
 const CANDIDATE_DIRECTIONS = [
   "稳健基线：优先均衡、甜感与高复现性，参数变化克制。",
@@ -231,18 +234,26 @@ async function generateCandidateContent(
   signal: AbortSignal,
   seed: number,
 ): Promise<string> {
+  const candidateSignal = AbortSignal.any([signal, AbortSignal.timeout(CANDIDATE_CHAIN_BUDGET_MS)]);
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await chatCompletion(messages, { model, signal, seed });
+      return await chatCompletion(messages, {
+        model,
+        signal: candidateSignal,
+        seed,
+        reasoningEffort: "low",
+        maxTokens: 3_000,
+        timeoutMs: CANDIDATE_MODEL_TIMEOUT_MS,
+      });
     } catch (err) {
       const mayRetry =
-        !signal.aborted &&
+        !candidateSignal.aborted &&
         attempt < CANDIDATE_TRANSPORT_RETRIES &&
         !isConcurrencyError(err) &&
         isTransientTransportError(err);
       if (!mayRetry) throw err;
       console.warn(`[generate] 候选请求遇到瞬时网络故障，准备第 ${attempt + 1} 次补发`);
-      await waitForCandidateRetry(CANDIDATE_RETRY_DELAY_MS, signal);
+      await waitForCandidateRetry(CANDIDATE_RETRY_DELAY_MS, candidateSignal);
     }
   }
 }
@@ -744,6 +755,13 @@ export function variantFailEvent(err: unknown): {
   return { type: "variant", stage: "result", ok: false, message: `AI 改进版生成失败：${msg}` };
 }
 
+export function shouldEmitVariantFailure(
+  abortKind: "client" | "timeout" | null,
+  writableEnded: boolean,
+): boolean {
+  return abortKind !== "client" && !writableEnded;
+}
+
 /** 反馈重生成模式的 prompt 段：基础配方 + 反馈 + 历史反馈 + dial-in 调参规则 */
 export function feedbackSection(
   baseRecipe: unknown,
@@ -831,9 +849,10 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
   const aborter = new AbortController();
   const generationTimeoutMs = Math.min(
     30 * 60_000,
-    Math.max(60_000, Number(process.env.GENERATION_TIMEOUT_MS) || 10 * 60_000),
+    Math.max(60_000, Number(process.env.GENERATION_TIMEOUT_MS) || 5 * 60_000),
   );
   let abortKind: "client" | "timeout" | null = null;
+  let deliverTimeoutCheckpoint: (() => boolean) | null = null;
   const generationTimer = setTimeout(() => {
     abortKind = "timeout";
     aborter.abort(new Error("整轮生成超时"));
@@ -841,11 +860,14 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
   const endAbortedGeneration = (): void => {
     clearTimeout(generationTimer);
     if (abortKind === "timeout" && !res.writableEnded) {
-      sendEvent(res, {
-        type: "error",
-        message: `本轮生成超过 ${Math.round(generationTimeoutMs / 60_000)} 分钟，已停止并保留输入内容`,
-      });
-      sendEvent(res, { type: "done" });
+      const delivered = deliverTimeoutCheckpoint?.() ?? false;
+      if (!delivered) {
+        sendEvent(res, {
+          type: "error",
+          message: `本轮生成超过 ${Math.round(generationTimeoutMs / 60_000)} 分钟，已停止并保留输入内容`,
+        });
+        sendEvent(res, { type: "done" });
+      }
     }
     if (!res.writableEnded) res.end();
   };
@@ -867,7 +889,7 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
     // 命中的 beanId 通过 beanMatch SSE 事件下发前端，使保存配方时带 beanId。
     /** 本次自由文本落档匹配到的 beanId（任务 #130：beanMatch 事件用） */
     let matchedBeanId: string | undefined;
-    if (shouldPersistFreeTextBean(body.beans, bean !== null)) {
+    if (shouldPersistFreeTextBean(body.beans, body.beanId)) {
       try {
         const persisted = ensureBeanFromFreeText(body.beans.trim());
         matchedBeanId = persisted.beanId;
@@ -949,6 +971,7 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
     let result: ParsedRecipe | null = null;
     let candidateScorePayload:
       | {
+          index: number;
           n: number;
           winner: number;
           score: number;
@@ -971,17 +994,104 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
       | undefined;
     let winnerRawContent: string | undefined;
     let allCandidatesVetoed = false;
+    type CandidatePickedEvent = {
+      type: "candidates";
+      stage: "picked";
+      round: number;
+      winner: number;
+      scores: Array<{
+        index: number;
+        score: number;
+        vetoed: boolean;
+        warns: number;
+        clamps: number;
+      }>;
+      results: Record<string, unknown>[];
+    };
+    let candidatePickedEvent: CandidatePickedEvent | undefined;
+    let restoredCandidatePickedEvent: CandidatePickedEvent | undefined;
     // 任务 #131：降级标记——未通过分数阈值/一致性/单调收敛时走 warning 通道披露
     let researchDegraded = false;
     let researchDegradeReason = "";
     // 任务 #131：跨轮持久——循环外声明、循环内赋值（autoFix/dual gen 需引用最终轮值）
     let userContent = "";
     let reviewFindings: ReviewFinding[] = [];
+    type ResearchDoneEvent = Record<string, unknown> & { type: "research"; stage: "done" };
+    type ReviewCompletedEvent = Record<string, unknown> & { type: "review"; stage: "fixed" };
+    type CompletedRound = {
+      score: number;
+      result: ParsedRecipe;
+      candidateScorePayload: NonNullable<typeof candidateScorePayload>;
+      winnerRawContent?: string;
+      allCandidatesVetoed: boolean;
+      reviewFindings: ReviewFinding[];
+      researchConsistency: typeof researchConsistency;
+      userContent: string;
+      candidatePickedEvent: CandidatePickedEvent;
+      researchDoneEvent?: ResearchDoneEvent;
+      reviewCompletedEvent: ReviewCompletedEvent;
+    };
+    let completedRound: CompletedRound | null = null;
+    let restoredResearchDoneEvent: ResearchDoneEvent | undefined;
+    let restoredReviewCompletedEvent: ReviewCompletedEvent | undefined;
+    const restoreCompletedRound = (reason: string): boolean => {
+      if (!completedRound) return false;
+      result = completedRound.result;
+      candidateScorePayload = completedRound.candidateScorePayload;
+      winnerRawContent = completedRound.winnerRawContent;
+      allCandidatesVetoed = completedRound.allCandidatesVetoed;
+      reviewFindings = completedRound.reviewFindings;
+      researchConsistency = completedRound.researchConsistency;
+      userContent = completedRound.userContent;
+      restoredCandidatePickedEvent = completedRound.candidatePickedEvent;
+      restoredResearchDoneEvent = completedRound.researchDoneEvent;
+      restoredReviewCompletedEvent = completedRound.reviewCompletedEvent;
+      researchDegraded = true;
+      researchDegradeReason = reason;
+      return true;
+    };
+    deliverTimeoutCheckpoint = () => {
+      if (!restoreCompletedRound("后续优选达到时间上限，已采用上一轮最高分方案")) return false;
+      if (restoredResearchDoneEvent) sendEvent(res, restoredResearchDoneEvent);
+      if (restoredCandidatePickedEvent) sendEvent(res, restoredCandidatePickedEvent);
+      if (restoredReviewCompletedEvent) sendEvent(res, restoredReviewCompletedEvent);
+      if (winnerRawContent) sendEvent(res, { type: "content", content: winnerRawContent });
+      if (matchedBeanId) {
+        const matchedBean = findBean(matchedBeanId);
+        sendEvent(res, {
+          type: "beanMatch",
+          beanId: matchedBeanId,
+          beanName: matchedBean?.name ?? "",
+          matched: true,
+        });
+      }
+      const timeoutWarnings = [
+        durationWarning(result!.recipe),
+        allCandidatesVetoed
+          ? "优选兜底：全部候选均触发一票否决，已按相对最优下发，请人工核对"
+          : undefined,
+        researchDegradeReason,
+      ].filter((value): value is string => Boolean(value));
+      sendEvent(res, {
+        type: "recipe",
+        recipe: result!.recipe,
+        clamped: result!.clamped,
+        ...(result!.changeNotes ? { changeNotes: result!.changeNotes } : {}),
+        ...(result!.brewRationale ? { brewRationale: result!.brewRationale } : {}),
+        ...(allSourceUrls.size > 0 ? { refUrls: [...allSourceUrls] } : {}),
+        ...(timeoutWarnings.length > 0 ? { warning: timeoutWarnings.join("；") } : {}),
+        ...(reviewFindings.length > 0 ? { reviewFindings } : {}),
+        ...(candidateScorePayload ? { candidateScore: candidateScorePayload } : {}),
+      });
+      sendEvent(res, { type: "done" });
+      return true;
+    };
 
     // 任务 #131：低分重调研 round 循环——包裹调研+多候选+autoFix+一致性校验
     // 第0轮正常；第1+轮 researchBean 传 excludeUrls + queryAngle 换源重调研
     // 单调收敛：本轮最高分≤上轮则提前终止降级披露；用尽也降级披露
     roundLoop: for (let round = 0; round <= maxResearchRounds; round++) {
+      let researchDoneEvent: ResearchDoneEvent | undefined;
       // 每轮重置 userParts（保留 base，重新追加本轮调研摘要）
       userParts.length = 0;
       userParts.push(...baseUserParts);
@@ -1030,7 +1140,7 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
           distilled: false,
           xhsLoginExpired: false,
         };
-        sendEvent(res, {
+        researchDoneEvent = {
           type: "research",
           stage: "done",
           round,
@@ -1041,7 +1151,8 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
           distilled: done.distilled,
           ...(done.ok && done.summaryText ? { summary: done.summaryText } : {}),
           ...(done.xhsLoginExpired ? { xhsLoginExpired: true } : {}),
-        });
+        };
+        sendEvent(res, researchDoneEvent);
         if (done.ok && done.summaryText) {
           researchSummaryText = done.summaryText;
           researchDistilled = done.distilled;
@@ -1076,6 +1187,7 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
       // 任务 #131：每轮重置 result/payload（round 0 正常、round>0 重调研后重生成）
       result = null;
       candidateScorePayload = undefined;
+      candidatePickedEvent = undefined;
       winnerRawContent = undefined;
       allCandidatesVetoed = false;
 
@@ -1213,6 +1325,13 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
           // 相同提示词 + 固定 seed 会让部分 OpenAI 兼容网关重放同一配方。
           // 首轮仍并行；仅对核心参数指纹重复的槽位做定向补发，保留 MAX 的速度与三案真实性。
           const accepted: Array<CandidateOutcome & { parsed: ParsedRecipe }> = [];
+          // Diversity repair is optional. Share one short phase budget across all
+          // duplicate slots so a usable first candidate is never lost to serial
+          // 90-second replacement chains.
+          const diversitySignal = AbortSignal.any([
+            aborter.signal,
+            AbortSignal.timeout(CANDIDATE_DIVERSITY_BUDGET_MS),
+          ]);
           for (const outcome of outcomes.sort((a, b) => a.index - b.index)) {
             if (!outcome.parsed) continue;
             if (
@@ -1231,7 +1350,7 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
                 const content = await generateCandidateContent(
                   candidateMessages(messages, outcome.index, n, existingRecipes),
                   body.model,
-                  aborter.signal,
+                  diversitySignal,
                   42 + round * 100 + outcome.index + retry * 1_000,
                 );
                 const parsed = toClampedRecipe(content);
@@ -1316,6 +1435,14 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
                 valid.push({ index: 0, content: retryContent, parsed, completionOrder: 0 });
               } catch (err) {
                 if (aborter.signal.aborted) throw err;
+                if (
+                  round > 0 &&
+                  restoreCompletedRound(
+                    `第 ${round + 1} 轮补发未取得有效方案，已采用上一轮最高分方案`,
+                  )
+                ) {
+                  break roundLoop;
+                }
                 sendEvent(res, {
                   type: "error",
                   message: `配方生成失败（已重试）：${zodIssues(err).join("；")}`,
@@ -1326,6 +1453,12 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
               }
             } else {
               // 全失败（请求类错误或无重试机会）→ 现有错误路径
+              if (
+                round > 0 &&
+                restoreCompletedRound(`第 ${round + 1} 轮候选全部失败，已采用上一轮最高分方案`)
+              ) {
+                break roundLoop;
+              }
               const firstFailure = failures[0];
               const msg =
                 firstFailure.kind === "structural"
@@ -1391,7 +1524,7 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
           const results = Array.from({ length: n }, (_, i) => resultsByIndex.get(i)).filter(
             (r): r is Record<string, unknown> => !!r,
           );
-          sendEvent(res, {
+          candidatePickedEvent = {
             type: "candidates",
             stage: "picked",
             round,
@@ -1404,7 +1537,8 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
               clamps: r.clamps,
             })),
             results,
-          });
+          };
+          sendEvent(res, candidatePickedEvent);
           result = winner.parsed;
           // 任务 #113：获胜候选原始非流式正文（recipe 前补发 content 事件，旧 SSE 消费者兼容）
           winnerRawContent = winner.content;
@@ -1412,6 +1546,7 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
           // → recipe 事件的 warning 通道附加兜底警告
           allCandidatesVetoed = winnerRanked.vetoed;
           candidateScorePayload = {
+            index: winnerIndex,
             n,
             winner: winnerIndex,
             score: winnerRanked.score,
@@ -1467,14 +1602,15 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
         }
       }
       // 审查终结事件：携带最终 findings 与是否修正；修正后仍有 error 也不阻塞交付
-      sendEvent(res, {
+      const reviewCompletedEvent: ReviewCompletedEvent = {
         type: "review",
         stage: "fixed",
         findings: reviewFindings,
         fixed: reviewFixed,
         dimensions: reviewDimensionCount(beanCtx, recentSkeletons),
         ...(preFixFindings ? { preFindings: preFixFindings } : {}),
-      });
+      };
+      sendEvent(res, reviewCompletedEvent);
 
       // 任务 #113：candidateScore 评分基于 auto-fix 前形态；auto-fix 改写了配方时
       // 追加 postFix:true 标记（纯增量、向后兼容），提示前端「评分基于修正前形态」
@@ -1488,6 +1624,23 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
         const signals = extractResearchSignals(researchSummaryText);
         researchConsistency = checkResearchConsistency(result.recipe, signals, researchDistilled);
         candidateScorePayload = { ...candidateScorePayload, researchConsistency };
+        if (!candidatePickedEvent) throw new Error("候选优选状态缺失");
+        const currentRound: CompletedRound = {
+          score: candidateScorePayload.score,
+          result,
+          candidateScorePayload,
+          ...(winnerRawContent ? { winnerRawContent } : {}),
+          allCandidatesVetoed,
+          reviewFindings: [...reviewFindings],
+          researchConsistency,
+          userContent,
+          candidatePickedEvent,
+          ...(researchDoneEvent ? { researchDoneEvent } : {}),
+          reviewCompletedEvent,
+        };
+        if (!completedRound || currentRound.score > completedRound.score) {
+          completedRound = currentRound;
+        }
 
         const pass =
           candidateScorePayload.score >= config.candidateScoreThreshold &&
@@ -1497,18 +1650,24 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
         if (round < maxResearchRounds) {
           // 单调收敛：本轮最高分≤上轮则提前终止降级披露
           if (candidateScorePayload.score <= prevMaxScore) {
-            researchDegraded = true;
-            researchDegradeReason = `候选评分 ${candidateScorePayload.score} 未超过上轮 ${prevMaxScore}，提前终止重调研`;
+            restoreCompletedRound(
+              `候选评分 ${candidateScorePayload.score} 未超过上轮 ${prevMaxScore}，已采用较高分方案`,
+            );
             break roundLoop;
           }
           prevMaxScore = candidateScorePayload.score;
           continue roundLoop;
         }
         // round == max，用尽重调研轮次仍不达标 → 降级披露
-        researchDegraded = true;
-        researchDegradeReason = researchConsistency.consistent
+        const exhaustedReason = researchConsistency.consistent
           ? `候选评分 ${candidateScorePayload.score} 低于阈值 ${config.candidateScoreThreshold}，已用尽 ${maxResearchRounds} 轮重调研`
           : `调研一致性校验未通过（${researchConsistency.deviations.map((d) => d.param).join("、")} 偏离），已用尽 ${maxResearchRounds} 轮重调研`;
+        if (completedRound.score > candidateScorePayload.score) {
+          restoreCompletedRound(`${exhaustedReason}，已采用全过程最高分方案`);
+        } else {
+          researchDegraded = true;
+          researchDegradeReason = exhaustedReason;
+        }
         break roundLoop;
       }
       // N=1 路径或无评分 payload，直接采用
@@ -1522,6 +1681,11 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
       res.end();
       return;
     }
+    // 后续轮次失败、超时或分数回退时，恢复上一轮候选明细，避免界面停留在
+    // “补发中”或只留下失败记录；配方、评分卡与最终历史条目保持同一轮。
+    if (restoredResearchDoneEvent) sendEvent(res, restoredResearchDoneEvent);
+    if (restoredCandidatePickedEvent) sendEvent(res, restoredCandidatePickedEvent);
+    if (restoredReviewCompletedEvent) sendEvent(res, restoredReviewCompletedEvent);
 
     // 任务 #113：N>1 非流式路径补发 content 事件（旧 SSE 消费者兼容）——获胜候选
     // auto-fix 完成后、recipe 前，恰好补发一条其原始非流式正文；N=1 流式路径不发
@@ -1663,7 +1827,7 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
           ...(bWarning ? { warning: bWarning } : {}),
         });
       } catch (err) {
-        if (!aborter.signal.aborted) {
+        if (shouldEmitVariantFailure(abortKind, res.writableEnded)) {
           try {
             sendEvent(res, variantFailEvent(err));
           } catch {
@@ -1694,13 +1858,14 @@ export default generateRouter;
 
 /**
  * 是否需要把自由文本豆信息自动落档（任务 #65）：
- * 仅当 beanId 未命中豆档案（或无 beanId）且 beans 文本非空时才落档。
- * 命中豆库档案时跳过：前端选豆发送的 beans 文本形如「豆名（产地，处理法…）」，
- * deriveBeanName 截出的名字与原豆名不匹配，若照常落档会每次生成都追加一条重复档案。
+ * 仅当请求未携带 beanId 且 beans 文本非空时才落档。
+ * beanId 是用户明确选择豆档案的意图；即使该档案刚被其他页面修改、当前读取暂未命中，
+ * 也不得把其上下文文本再次当作自由输入建档。
  */
 export function shouldPersistFreeTextBean(
   beansText: unknown,
-  beanHit: boolean,
+  selectedBeanId: unknown,
 ): beansText is string {
-  return !beanHit && typeof beansText === "string" && beansText.trim() !== "";
+  const hasSelectedBean = typeof selectedBeanId === "string" && selectedBeanId.trim() !== "";
+  return !hasSelectedBean && typeof beansText === "string" && beansText.trim() !== "";
 }

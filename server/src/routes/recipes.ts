@@ -28,6 +28,22 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 // src/routes → 仓库根：../../..（dist/routes 同样适用）
 export const RECIPES_FILE = path.resolve(here, "../../../data/recipes.json");
 
+export function isValidPairPatch(pairId: unknown, variant: unknown): pairId is string {
+  return (
+    typeof pairId === "string" && variant === "improved" && /^[0-9a-f-]{36}$/i.test(pairId.trim())
+  );
+}
+
+export function normalizeRecipeSaveRequestId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+    normalized,
+  )
+    ? normalized
+    : undefined;
+}
+
 /** 冲煮反馈味型枚举（generate 重生成调参分支的输入）：五味型 + 三枚风味维度标签 */
 export const TASTE_TAGS = [
   "偏酸",
@@ -183,23 +199,42 @@ recipesRouter.post("/api/recipes", (req: Request, res: Response) => {
     /** 方案解读（任务 #72） */
     brewRationale?: unknown;
     cloudTableId?: unknown;
+    clientRequestId?: unknown;
   };
   if (!body.recipe || typeof body.recipe !== "object") {
     res.status(400).json({ ok: false, error: "recipe 不能为空" });
     return;
   }
   try {
+    const clientRequestId = normalizeRecipeSaveRequestId(body.clientRequestId);
+    if (body.clientRequestId !== undefined && !clientRequestId) {
+      res.status(400).json({ ok: false, error: "clientRequestId 格式有误" });
+      return;
+    }
+    const list = loadAll();
+    const existing = clientRequestId
+      ? list.find((entry) => entry.id === clientRequestId)
+      : undefined;
+    if (existing) {
+      const warning = durationWarning(existing.recipe);
+      res.json({
+        ok: true,
+        id: existing.id,
+        ...(existing.version ? { version: existing.version } : {}),
+        ...(warning ? { warning } : {}),
+      });
+      return;
+    }
     // 入库前统一钳位到 SAFE_LIMITS，保证库中配方永远合法
     const { recipe } = clampRecipe(body.recipe);
     if (body.name && typeof body.name === "string" && body.name.trim()) {
       recipe.name = body.name.trim();
     }
-    const list = loadAll();
     // 版本链：parent 不存在时忽略 parentId（不产生悬空引用）
     const parent =
       typeof body.parentId === "string" ? list.find((r) => r.id === body.parentId) : undefined;
     const entry: StoredRecipe = {
-      id: crypto.randomUUID(),
+      id: clientRequestId ?? crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       recipe,
       ...(parent ? { parentId: parent.id, version: deriveVersion(parent) } : {}),
@@ -279,11 +314,21 @@ recipesRouter.post("/api/recipes", (req: Request, res: Response) => {
  */
 recipesRouter.patch("/api/recipes/:id", (req: Request, res: Response) => {
   const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-  const body = (req.body ?? {}) as { beanId?: unknown; cloudTableId?: unknown };
+  const body = (req.body ?? {}) as {
+    beanId?: unknown;
+    cloudTableId?: unknown;
+    pairId?: unknown;
+    variant?: unknown;
+    name?: unknown;
+  };
   const hasBeanPatch = typeof body.beanId === "string";
   const hasCloudPatch = typeof body.cloudTableId === "string";
-  if (hasBeanPatch === hasCloudPatch) {
-    res.status(400).json({ ok: false, error: "请只提交 beanId 或 cloudTableId 其中一项" });
+  const hasPairPatch = typeof body.pairId === "string";
+  if (Number(hasBeanPatch) + Number(hasCloudPatch) + Number(hasPairPatch) !== 1) {
+    res.status(400).json({
+      ok: false,
+      error: "请只提交 beanId、cloudTableId 或 pairId 其中一项",
+    });
     return;
   }
   const list = loadAll();
@@ -292,7 +337,18 @@ recipesRouter.patch("/api/recipes/:id", (req: Request, res: Response) => {
     res.status(404).json({ ok: false, error: `配方 ${id} 不存在` });
     return;
   }
-  if (hasCloudPatch) {
+  if (hasPairPatch) {
+    const pairId = (body.pairId as string).trim();
+    if (!isValidPairPatch(pairId, body.variant)) {
+      res.status(400).json({ ok: false, error: "pairId 或 variant 格式有误" });
+      return;
+    }
+    entry.pairId = pairId;
+    entry.variant = "improved";
+    if (typeof body.name === "string" && body.name.trim()) {
+      entry.recipe.name = body.name.trim().slice(0, 120);
+    }
+  } else if (hasCloudPatch) {
     const cloudTableId = (body.cloudTableId as string).trim();
     if (!/^\d{1,20}$/.test(cloudTableId)) {
       res.status(400).json({ ok: false, error: "cloudTableId 格式有误" });

@@ -17,6 +17,7 @@ import {
 } from "./model-settings.ts";
 import { generationQuotaSubjects, sameOriginMutation } from "./session.ts";
 import { handleXbloomRoute } from "./xbloom-cloud.ts";
+import { createSseResponse, type SseSender } from "./sse.ts";
 
 export interface Env extends ModelSettingsEnv {
   DB: D1Database;
@@ -75,6 +76,16 @@ async function requestBody(request: Request): Promise<Record<string, unknown>> {
   return parsed as Record<string, unknown>;
 }
 
+function normalizeRecipeSaveRequestId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+    normalized,
+  )
+    ? normalized
+    : undefined;
+}
+
 async function listItems(env: Env, owner: string, kind: "recipe" | "bean"): Promise<unknown[]> {
   const result = await env.DB.prepare(
     "SELECT id, created_at, json FROM user_items WHERE owner=? AND kind=? ORDER BY created_at DESC",
@@ -103,6 +114,21 @@ async function putItem(
     .run();
 }
 
+async function insertItemIfAbsent(
+  env: Env,
+  owner: string,
+  kind: "recipe" | "bean",
+  id: string,
+  createdAt: string,
+  value: unknown,
+): Promise<void> {
+  await env.DB.prepare(
+    "INSERT INTO user_items(owner,kind,id,created_at,json) VALUES(?,?,?,?,?) ON CONFLICT(owner,kind,id) DO NOTHING",
+  )
+    .bind(owner, kind, id, createdAt, JSON.stringify(value))
+    .run();
+}
+
 async function getItem(
   env: Env,
   owner: string,
@@ -124,6 +150,14 @@ const HOSTED_CANDIDATE_DIRECTIONS = [
   "清晰路线：在用户目标内突出干净度、层次和风味辨识度。",
   "圆润路线：在用户目标内突出甜感、质感和余韵完整度。",
 ] as const;
+
+const HOSTED_MODEL_REQUEST_TIMEOUT_MS = 60_000;
+const HOSTED_MAX_CANDIDATE_BUDGET_MS = 75_000;
+const HOSTED_SINGLE_CANDIDATE_BUDGET_MS = 90_000;
+const HOSTED_MAX_TOTAL_BUDGET_MS = 150_000;
+const HOSTED_SINGLE_TOTAL_BUDGET_MS = 105_000;
+const HOSTED_MAX_SCORE_TARGET = 90;
+const HOSTED_DIVERSITY_RETRIES = 1;
 
 function isTransientModelError(error: unknown): boolean {
   const message = String((error as Error)?.message ?? error).toLowerCase();
@@ -215,7 +249,10 @@ async function callModelOnce(
   requestSignal: AbortSignal,
 ): Promise<{ recipe: HostedRecipe; clamps: string[]; model: string }> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort("timeout"), 120_000);
+  const timeout = setTimeout(
+    () => controller.abort(new Error("model request timeout")),
+    HOSTED_MODEL_REQUEST_TIMEOUT_MS,
+  );
   const abortFromRequest = (): void => controller.abort(requestSignal.reason ?? "request aborted");
   if (requestSignal.aborted) abortFromRequest();
   else requestSignal.addEventListener("abort", abortFromRequest, { once: true });
@@ -241,7 +278,12 @@ async function callModelOnce(
               : ""),
         },
       ],
-      { signal: controller.signal, timeoutMs: 120_000, temperature: 0.3, maxTokens: 3000 },
+      {
+        signal: controller.signal,
+        timeoutMs: HOSTED_MODEL_REQUEST_TIMEOUT_MS,
+        temperature: 0.3,
+        maxTokens: 3000,
+      },
     );
     return {
       ...normalizeRecipeWithReport(
@@ -357,6 +399,30 @@ export function hostedCandidateSelection(outcomes: HostedCandidateOutcome[]) {
   };
 }
 
+function hostedCandidateProgress(outcome: HostedCandidateOutcome) {
+  if (!outcome.recipe) {
+    return {
+      index: outcome.index,
+      status: "failed" as const,
+      failReason: outcome.error || "上游模型请求未完成",
+    };
+  }
+  return {
+    index: outcome.index,
+    status: "ok" as const,
+    recipeSummary: hostedRecipeSummary(outcome.recipe),
+  };
+}
+
+function candidateBudgetSignal(signal: AbortSignal, candidateTotal: number): AbortSignal {
+  return AbortSignal.any([
+    signal,
+    AbortSignal.timeout(
+      candidateTotal > 1 ? HOSTED_MAX_CANDIDATE_BUDGET_MS : HOSTED_SINGLE_CANDIDATE_BUDGET_MS,
+    ),
+  ]);
+}
+
 async function incrementQuota(env: Env, subject: string, bucket: string): Promise<number> {
   await env.DB.prepare(
     "INSERT INTO generation_usage(owner,hour_bucket,request_count) VALUES(?,?,1) ON CONFLICT(owner,hour_bucket) DO UPDATE SET request_count=request_count+1",
@@ -382,17 +448,6 @@ async function enforceGenerationQuota(env: Env, request: Request, owner: string)
   if (globalCount > 500) throw new Error("站点本小时生成额度已用完，请稍后继续");
   if (networkCount > 60) throw new Error("当前网络本小时生成次数已到 60 次，请稍后继续");
   if (browserCount > 20) throw new Error("本浏览器本小时生成次数已到 20 次，请稍后继续");
-}
-
-function sse(events: unknown[]): Response {
-  const body = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
-  return new Response(body, {
-    headers: {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-store",
-      "x-accel-buffering": "no",
-    },
-  });
 }
 
 interface HostedResearchPacket {
@@ -448,6 +503,218 @@ export function hostedResearchPacket(value: unknown): HostedResearchPacket | nul
   };
 }
 
+type HostedConnection = NonNullable<Awaited<ReturnType<typeof modelConnectionForUser>>>;
+type HostedSelection = ReturnType<typeof hostedCandidateSelection>;
+
+function emitHostedResearch(
+  send: SseSender,
+  mode: "fast" | "pro" | "max",
+  body: Record<string, unknown>,
+  description: string,
+  research: HostedResearchPacket | null,
+): void {
+  if (mode === "fast") return;
+  const query =
+    typeof body.beans === "string" && body.beans.trim()
+      ? body.beans.trim().slice(0, 500)
+      : description;
+  send({ type: "research", stage: "start", query });
+  for (const source of research?.sources ?? [])
+    send({ type: "research", stage: "source", ...source });
+  send({
+    type: "research",
+    stage: "done",
+    ok: research?.ok ?? false,
+    message:
+      research?.message ??
+      "本次使用豆档案、口味目标与用户提供的参考资料生成；连接本地助手后还可加入小红书与网页调研。",
+    sources: research?.sources ?? [],
+    filtered: research?.filtered ?? 0,
+    distilled: research?.distilled ?? false,
+    ...(research?.summaryText ? { summary: research.summaryText } : {}),
+    ...(research?.xhsLoginExpired ? { xhsLoginExpired: true } : {}),
+  });
+}
+
+interface HostedCandidateRun {
+  send: SseSender;
+  clientSignal: AbortSignal;
+  generationSignal: AbortSignal;
+  connection: HostedConnection;
+  description: string;
+  body: Record<string, unknown>;
+  research: HostedResearchPacket | null;
+  count: number;
+}
+
+async function generateHostedCandidates(
+  input: HostedCandidateRun,
+): Promise<HostedCandidateOutcome[]> {
+  const { send, clientSignal, generationSignal, connection, description, body, research, count } =
+    input;
+  if (count > 1) send({ type: "candidates", stage: "start", n: count, round: 0 });
+  let done = 0;
+  return Promise.all(
+    Array.from({ length: count }, async (_, index) => {
+      let outcome: HostedCandidateOutcome;
+      try {
+        const generated = await callModel(
+          connection,
+          description,
+          {
+            ...body,
+            candidate: index + 1,
+            ...(research?.summaryText ? { researchSummary: research.summaryText } : {}),
+          },
+          index,
+          count,
+          42 + index,
+          [],
+          candidateBudgetSignal(generationSignal, count),
+        );
+        outcome = { index, ...generated };
+      } catch (error) {
+        if (clientSignal.aborted) throw error;
+        outcome = { index, error: publicHostedFailureReason(error) };
+      }
+      done += 1;
+      if (count > 1 && !clientSignal.aborted) {
+        send({
+          type: "candidates",
+          stage: "progress",
+          done,
+          total: count,
+          round: 0,
+          result: hostedCandidateProgress(outcome),
+        });
+      }
+      return outcome;
+    }),
+  );
+}
+
+interface HostedCandidateFollowup {
+  outcomes: HostedCandidateOutcome[];
+  clientSignal: AbortSignal;
+  generationSignal: AbortSignal;
+  connection: HostedConnection;
+  description: string;
+  body: Record<string, unknown>;
+}
+
+async function deduplicateHostedCandidates(
+  input: HostedCandidateFollowup,
+): Promise<HostedCandidateOutcome[]> {
+  const outcomes = input.outcomes.map((outcome) => ({ ...outcome }));
+  const accepted: HostedRecipe[] = [];
+  for (const outcome of outcomes.sort((left, right) => left.index - right.index)) {
+    if (!outcome.recipe) continue;
+    if (accepted.every((recipe) => hostedRecipesAreDistinct(recipe, outcome.recipe!))) {
+      accepted.push(outcome.recipe);
+      continue;
+    }
+
+    let replacement: { recipe: HostedRecipe; clamps: string[]; model: string } | undefined;
+    let replacementError: string | undefined;
+    for (
+      let retry = 1;
+      retry <= HOSTED_DIVERSITY_RETRIES && !input.generationSignal.aborted;
+      retry += 1
+    ) {
+      try {
+        const candidate = await callModel(
+          input.connection,
+          input.description,
+          { ...input.body, candidate: outcome.index + 1, diversityRetry: retry },
+          outcome.index,
+          3,
+          42 + outcome.index + retry * 1_000,
+          accepted,
+          candidateBudgetSignal(input.generationSignal, 3),
+        );
+        if (accepted.some((recipe) => !hostedRecipesAreDistinct(recipe, candidate.recipe))) {
+          replacementError = "方案参数重复，补发后仍未形成有效差异";
+          continue;
+        }
+        replacement = candidate;
+        break;
+      } catch (error) {
+        if (input.clientSignal.aborted) throw error;
+        replacementError = publicHostedFailureReason(error);
+      }
+    }
+    outcome.recipe = replacement?.recipe;
+    outcome.clamps = replacement?.clamps;
+    outcome.model = replacement?.model;
+    outcome.error = replacement
+      ? undefined
+      : replacementError || "方案参数重复，本轮采用其余有效候选";
+    if (replacement) accepted.push(replacement.recipe);
+  }
+  return outcomes.sort((left, right) => left.index - right.index);
+}
+
+function emitHostedPicked(send: SseSender, selection: HostedSelection, round: number): void {
+  send({
+    type: "candidates",
+    stage: "picked",
+    round,
+    winner: selection.winner.index,
+    scores: selection.scores,
+    results: selection.results,
+  });
+}
+
+async function refineLowestHostedCandidate(
+  input: HostedCandidateFollowup & { send: SseSender; selection: HostedSelection },
+): Promise<{ outcomes: HostedCandidateOutcome[]; selection: HostedSelection }> {
+  const failed = input.outcomes.find((outcome) => !outcome.recipe);
+  const targetIndex = failed?.index ?? input.selection.ranked.at(-1)!.index;
+  const existing = input.outcomes.flatMap((outcome) => (outcome.recipe ? [outcome.recipe] : []));
+  input.send({ type: "candidates", stage: "start", n: 1, round: 1 });
+
+  let replacement: HostedCandidateOutcome;
+  try {
+    const generated = await callModel(
+      input.connection,
+      input.description,
+      {
+        ...input.body,
+        refinementRound: 1,
+        scoreTarget: HOSTED_MAX_SCORE_TARGET,
+        previousBest: input.selection.winner.recipe,
+        deductions: input.selection.winner.scoreReport.deductions,
+      },
+      targetIndex,
+      3,
+      2_042 + targetIndex,
+      existing,
+      AbortSignal.any([input.generationSignal, AbortSignal.timeout(60_000)]),
+    );
+    replacement = existing.every((recipe) => hostedRecipesAreDistinct(recipe, generated.recipe))
+      ? { index: targetIndex, ...generated }
+      : { index: targetIndex, error: "补发方案与现有候选过于接近" };
+  } catch (error) {
+    if (input.clientSignal.aborted) throw error;
+    replacement = { index: targetIndex, error: publicHostedFailureReason(error) };
+  }
+
+  input.send({
+    type: "candidates",
+    stage: "progress",
+    done: 1,
+    total: 1,
+    round: 1,
+    result: hostedCandidateProgress(replacement),
+  });
+  if (!replacement.recipe) return { outcomes: input.outcomes, selection: input.selection };
+
+  const outcomes = input.outcomes.map((outcome) =>
+    outcome.index === targetIndex ? replacement : outcome,
+  );
+  return { outcomes, selection: hostedCandidateSelection(outcomes) };
+}
+
 async function generate(
   request: Request,
   env: Env,
@@ -463,147 +730,97 @@ async function generate(
     return json({ ok: false, message: "请填写 1-4000 字的冲煮需求" }, 400);
   const mode = body.mode === "max" ? "max" : body.mode === "pro" ? "pro" : "fast";
   const count = mode === "max" ? 3 : 1;
-  const events: unknown[] = [];
   const research = mode === "fast" ? null : hostedResearchPacket(body.researchPacket);
-  if (mode !== "fast") {
-    const query =
-      typeof body.beans === "string" && body.beans.trim()
-        ? body.beans.trim().slice(0, 500)
-        : description;
-    events.push({ type: "research", stage: "start", query });
-    for (const source of research?.sources ?? []) {
-      events.push({ type: "research", stage: "source", ...source });
-    }
-    events.push({
-      type: "research",
-      stage: "done",
-      ok: research?.ok ?? false,
-      message:
-        research?.message ??
-        "本次使用豆档案、口味目标与用户提供的参考资料生成；连接本地助手后还可加入小红书与网页调研。",
-      sources: research?.sources ?? [],
-      filtered: research?.filtered ?? 0,
-      distilled: research?.distilled ?? false,
-      ...(research?.summaryText ? { summary: research.summaryText } : {}),
-      ...(research?.xhsLoginExpired ? { xhsLoginExpired: true } : {}),
-    });
-  }
-  if (count === 3) events.push({ type: "candidates", stage: "start", n: 3, round: 0 });
-  const outcomes: HostedCandidateOutcome[] = await Promise.all(
-    Array.from({ length: count }, async (_, index) => {
+  return createSseResponse(
+    async (send, clientSignal) => {
+      const totalBudget = count === 3 ? HOSTED_MAX_TOTAL_BUDGET_MS : HOSTED_SINGLE_TOTAL_BUDGET_MS;
+      const generationSignal = AbortSignal.any([clientSignal, AbortSignal.timeout(totalBudget)]);
       try {
-        const generated = await callModel(
+        emitHostedResearch(send, mode, body, description, research);
+        let outcomes = await generateHostedCandidates({
+          send,
+          clientSignal,
+          generationSignal,
           connection,
           description,
-          {
-            ...body,
-            candidate: index + 1,
-            ...(research?.summaryText ? { researchSummary: research.summaryText } : {}),
-          },
-          index,
+          body,
+          research,
           count,
-          42 + index,
-          [],
-          request.signal,
-        );
-        return { index, ...generated };
-      } catch (error) {
-        if (request.signal.aborted) throw error;
-        return { index, error: publicHostedFailureReason(error) };
-      }
-    }),
-  );
-
-  if (count === 3) {
-    for (const outcome of outcomes) {
-      if (!outcome.recipe) continue;
-      const acceptedRecipes = outcomes
-        .filter((entry) => entry.index < outcome.index && entry.recipe)
-        .map((entry) => entry.recipe!);
-      if (acceptedRecipes.every((recipe) => hostedRecipesAreDistinct(recipe, outcome.recipe!))) {
-        continue;
-      }
-      let replacement: { recipe: HostedRecipe; clamps: string[]; model: string } | undefined;
-      let replacementError: string | undefined;
-      for (let retry = 1; retry <= 2; retry += 1) {
-        try {
-          const candidate = await callModel(
+        });
+        if (count === 3) {
+          outcomes = await deduplicateHostedCandidates({
+            outcomes,
+            clientSignal,
+            generationSignal,
             connection,
             description,
-            { ...body, candidate: outcome.index + 1 },
-            outcome.index,
-            count,
-            42 + outcome.index + retry * 1_000,
-            acceptedRecipes,
-            request.signal,
-          );
-          if (
-            acceptedRecipes.some(
-              (existing) => !hostedRecipesAreDistinct(existing, candidate.recipe),
-            )
-          )
-            continue;
-          replacement = candidate;
-          break;
-        } catch (error) {
-          if (request.signal.aborted) throw error;
-          replacementError = publicHostedFailureReason(error);
-          // 下一次定向补发继续使用新的 seed。
+            body,
+          });
         }
-      }
-      outcome.recipe = replacement?.recipe;
-      outcome.clamps = replacement?.clamps;
-      outcome.error = replacement
-        ? undefined
-        : replacementError || "方案参数重复，定向补发后仍未形成有效差异";
-    }
-  }
 
-  const selection = hostedCandidateSelection(outcomes);
-  if (count === 3) {
-    outcomes.forEach((outcome, index) =>
-      events.push({
-        type: "candidates",
-        stage: "progress",
-        done: index + 1,
-        total: 3,
-        round: 0,
-        result: selection.results.find((result) => result.index === outcome.index),
-      }),
-    );
-    events.push({
-      type: "candidates",
-      stage: "picked",
-      round: 0,
-      winner: selection.winner.index,
-      scores: selection.scores,
-      results: selection.results,
-    });
-  }
-  events.push(
-    {
-      type: "recipe",
-      recipe: selection.winner.recipe,
-      clamped: selection.winner.clamps ?? [],
-      model: selection.winner.model ?? connection.model,
-      ...(count === 3
-        ? {
-            candidateScore: {
-              n: 3,
-              winner: selection.winner.index,
-              index: selection.winner.index,
-              score: selection.winner.scoreReport.score,
-              vetoed: false,
-              warns: 0,
-              clamps: selection.winner.clamps?.length ?? 0,
-              deductions: selection.winner.scoreReport.deductions,
-            },
+        let selection = hostedCandidateSelection(outcomes);
+        let refinementAttempted = false;
+        if (count === 3) {
+          emitHostedPicked(send, selection, 0);
+          if (
+            selection.winner.scoreReport.score < HOSTED_MAX_SCORE_TARGET &&
+            !generationSignal.aborted
+          ) {
+            refinementAttempted = true;
+            const refined = await refineLowestHostedCandidate({
+              send,
+              outcomes,
+              selection,
+              clientSignal,
+              generationSignal,
+              connection,
+              description,
+              body,
+            });
+            outcomes = refined.outcomes;
+            selection = refined.selection;
+            emitHostedPicked(send, selection, 1);
           }
-        : {}),
+        }
+
+        const belowTarget =
+          count === 3 && selection.winner.scoreReport.score < HOSTED_MAX_SCORE_TARGET;
+        send({
+          type: "recipe",
+          recipe: selection.winner.recipe,
+          clamped: selection.winner.clamps ?? [],
+          model: selection.winner.model ?? connection.model,
+          ...(belowTarget
+            ? {
+                warning: refinementAttempted
+                  ? "MAX 已完成限时补发，采用当前最高分方案"
+                  : "MAX 已在本轮时间预算内采用当前最高分方案",
+              }
+            : {}),
+          ...(count === 3
+            ? {
+                candidateScore: {
+                  n: 3,
+                  winner: selection.winner.index,
+                  index: selection.winner.index,
+                  score: selection.winner.scoreReport.score,
+                  vetoed: false,
+                  warns: 0,
+                  clamps: selection.winner.clamps?.length ?? 0,
+                  deductions: selection.winner.scoreReport.deductions,
+                },
+              }
+            : {}),
+        });
+        send({ type: "done" });
+      } catch (error) {
+        if (clientSignal.aborted) return;
+        send({ type: "error", message: publicHostedFailureReason(error) });
+        send({ type: "done" });
+      }
     },
-    { type: "done" },
+    { clientSignal: request.signal },
   );
-  return sse(events);
 }
 
 async function routeApi(request: Request, env: Env, identity: RequestIdentity): Promise<Response> {
@@ -635,10 +852,24 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
     return json({ ok: true, recipes: await listItems(env, identity.owner, "recipe") });
   if (request.method === "POST" && path === "/api/recipes") {
     const body = await requestBody(request);
-    const id = crypto.randomUUID();
-    const createdAt = new Date().toISOString();
     if (!body.recipe) return json({ ok: false, message: "缺少 recipe" }, 400);
-    await putItem(env, identity.owner, "recipe", id, createdAt, body);
+    const clientRequestId = normalizeRecipeSaveRequestId(body.clientRequestId);
+    if (body.clientRequestId !== undefined && !clientRequestId)
+      return json({ ok: false, message: "clientRequestId 格式有误" }, 400);
+    const id = clientRequestId ?? crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const { clientRequestId: _clientRequestId, ...value } = body;
+    if (
+      typeof value.name === "string" &&
+      value.name.trim() &&
+      value.recipe &&
+      typeof value.recipe === "object" &&
+      !Array.isArray(value.recipe)
+    ) {
+      value.recipe = { ...(value.recipe as Record<string, unknown>), name: value.name.trim() };
+    }
+    // Atomic first-write-wins: concurrent retries share one row and later payloads never overwrite it.
+    await insertItemIfAbsent(env, identity.owner, "recipe", id, createdAt, value);
     return json({ ok: true, id, version: 1 });
   }
   const recipeMatch = path.match(/^\/api\/recipes\/([0-9a-f-]+)$/i);
@@ -652,9 +883,21 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
     const current = await getItem(env, identity.owner, "recipe", recipeMatch[1]);
     if (!current) return json({ ok: false, message: "配方不存在" }, 404);
     const patch = await requestBody(request);
+    const nextValue = { ...current.value, ...patch };
+    if (
+      typeof patch.name === "string" &&
+      patch.name.trim() &&
+      current.value.recipe &&
+      typeof current.value.recipe === "object" &&
+      !Array.isArray(current.value.recipe)
+    ) {
+      nextValue.recipe = {
+        ...(current.value.recipe as Record<string, unknown>),
+        name: patch.name.trim().slice(0, 120),
+      };
+    }
     await putItem(env, identity.owner, "recipe", recipeMatch[1], current.createdAt, {
-      ...current.value,
-      ...patch,
+      ...nextValue,
     });
     return json({ ok: true });
   }

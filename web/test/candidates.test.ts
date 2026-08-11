@@ -61,6 +61,29 @@ describe("reduceCandidatesEvent（任务 #106）", () => {
     assert.equal(s.scores.length, 3);
   });
 
+  it("单槽补发完成后按最终 results 恢复三候选总数", () => {
+    const refining = reduceCandidatesEvent(CANDIDATES_IDLE, {
+      type: "candidates",
+      stage: "start",
+      n: 1,
+      round: 1,
+    });
+    const picked = reduceCandidatesEvent(refining, {
+      type: "candidates",
+      stage: "picked",
+      winner: 0,
+      scores: [{ index: 0, score: 91, vetoed: false, warns: 0, clamps: 0 }],
+      results: [
+        { index: 0, status: "ok", score: 91 },
+        { index: 1, status: "ok", score: 87 },
+        { index: 2, status: "failed", failReason: "超时" },
+      ],
+      round: 1,
+    } as unknown as GenerateEvent);
+    assert.equal(picked.total, 3);
+    assert.equal(picked.results.length, 3);
+  });
+
   it("recipe.candidateScore → 记录优选明细 detail", () => {
     const detail = {
       n: 3,
@@ -95,6 +118,16 @@ describe("candidatesProgressText", () => {
       total: 3,
     });
     assert.equal(candidatesProgressText(s2), "正在并行生成 3 份方案…(2/3)");
+  });
+
+  it("补发轮次明确显示轮次，不让进度看起来突然关闭", () => {
+    const refining = reduceCandidatesEvent(CANDIDATES_IDLE, {
+      type: "candidates",
+      stage: "start",
+      n: 1,
+      round: 1,
+    });
+    assert.equal(candidatesProgressText(refining), "第 2 轮正在补发 1 份方案…(0/1)");
   });
 
   it("idle / picked 阶段返回空串（N=1 UI 逐字节不变的前提）", () => {

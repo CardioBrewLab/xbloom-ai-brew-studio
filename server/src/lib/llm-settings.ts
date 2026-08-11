@@ -7,7 +7,10 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { detectModelProvider, equivalentModelBaseUrls } from "@xbloom/shared/model-provider";
+import {
+  detectModelProvider,
+  equivalentModelBaseUrls,
+} from "../../../shared/dist/model-provider.js";
 import { config, type AppConfig } from "../config.js";
 import { atomicWriteJson } from "./data-io.js";
 import { withFileLock } from "./store-mutex.js";

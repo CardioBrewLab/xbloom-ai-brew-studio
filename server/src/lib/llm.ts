@@ -13,7 +13,7 @@
  *   用 LLM_API_KEY（缺省回退）。模型 ID 一律从配置读取，不硬编码。
  */
 import { fetch } from "undici";
-import { generateModelText, type FetchLike } from "@xbloom/shared/model-provider";
+import { generateModelText, type FetchLike } from "../../../shared/dist/model-provider.js";
 import { config } from "../config.js";
 
 const DEFAULT_LLM_REQUEST_TIMEOUT_MS = 120_000;
@@ -386,6 +386,8 @@ export interface CompletionOptions {
   temperature?: number;
   maxTokens?: number;
   signal?: AbortSignal;
+  /** 单个候选的整条模型链时间预算；缺省沿用 LLM_REQUEST_TIMEOUT_MS。 */
+  timeoutMs?: number;
   /** undefined 沿用全局 OpenAI 推理强度；false 关闭；字符串按任务覆盖。 */
   reasoningEffort?: string | false;
   /** 非流式候选的 best-effort seed；缺省保持历史固定值。 */
@@ -400,7 +402,7 @@ async function completionSingle(
 ): Promise<string> {
   const provider = config.llm.provider;
   if (provider !== "openai-compatible") {
-    const requestSignal = llmRequestSignal(opts.signal);
+    const requestSignal = llmRequestSignal(opts.signal, opts.timeoutMs);
     try {
       return await generateModelText(
         {
@@ -428,7 +430,7 @@ async function completionSingle(
   const seed = model.toLowerCase().includes("gpt")
     ? { seed: Number.isFinite(opts.seed) ? Math.trunc(opts.seed!) : LLM_SEED_BEST_EFFORT }
     : {};
-  const requestSignal = llmRequestSignal(opts.signal);
+  const requestSignal = llmRequestSignal(opts.signal, opts.timeoutMs);
   let res;
   try {
     res = await fetch(url, {

@@ -113,7 +113,7 @@ Windows launcher 使用以下默认值：
 
 Hosted 版直接在网站内启动 Cloudflare Browser Run 取码和检索；扫码不是使用工作台的前提，登录后才会在 Pro/Max 生成中加入小红书来源。Cookie 由 Worker 使用 `APP_DATA_ENCRYPTION_KEY` 加密，并按匿名浏览器或站内账号的 owner 隔离。Windows 本地版继续使用可选的本地助手，登录状态留在当前电脑。
 
-免费部署默认每天最多启动 6 次扫码/登录校验和 20 次小红书检索，可通过 `XHS_BROWSER_QR_DAILY_LIMIT`、`XHS_BROWSER_SEARCH_DAILY_LIMIT` 调整。每个 owner 还分别限制为每天 3 次扫码和 10 次检索，避免单个访客占满站点预算。
+个人演示默认使用 `XHS_BROWSER_PROFILE=free`：全站每天 3 次扫码/登录校验和 20 次小红书检索，每个 owner 分别为 3 次和 10 次。Workers Paid 的公开运营部署可用 `-XhsBrowserProfile scale`，默认提高到全站 2500/20000、单 owner 8/100；也可用四个 `XHS_BROWSER_*_DAILY_LIMIT` 变量精确覆盖。有效二维码会复用，执行异常会退回站内计数；公开笔记检索结果默认缓存 24 小时，缓存键是关键词摘要，不保存搜索原文或用户身份。
 
 SearXNG 和 Firecrawl 是独立的调研服务。只配置当前流程需要的服务，并确认发送给每个服务的数据范围。助手或调研服务离线时，可以直接使用冲煮目标和模型连接。
 

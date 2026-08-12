@@ -25,9 +25,13 @@
     // Leave blank for account-owned BYOK. A deployer-wide guest model is optional.
     "LLM_BASE_URL": "https://YOUR_OPENAI_COMPATIBLE_HOST/v1",
     "LLM_MODEL": "YOUR_MODEL_ID",
-    // Free-tier guardrails. Raise these after confirming the current Browser Run plan.
+    // free: personal demo guardrails; scale: about 1000 daily users on Workers Paid.
+    "XHS_BROWSER_PROFILE": "free",
     "XHS_BROWSER_QR_DAILY_LIMIT": "3",
     "XHS_BROWSER_SEARCH_DAILY_LIMIT": "20",
+    "XHS_BROWSER_QR_OWNER_DAILY_LIMIT": "3",
+    "XHS_BROWSER_SEARCH_OWNER_DAILY_LIMIT": "10",
+    "XHS_RESEARCH_CACHE_TTL_SECONDS": "86400",
   },
   "observability": {
     "enabled": true,

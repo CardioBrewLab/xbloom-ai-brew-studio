@@ -170,6 +170,34 @@ describe("POST /api/beans/parse（任务 #118）", () => {
     assert.equal((json.parsed as Record<string, unknown>).roastLevel, "浅焙");
   });
 
+  it("混排冲煮文本：烘焙度不冒充豆名，冲煮步骤进入参考方案", async () => {
+    const source =
+      "•浅度烘焙\n参考风味：水蜜桃覆盆子花蜜\n研磨度：C40 MK4 26格 粉水比：1:16\n" +
+      "①0-10秒注水53g，焖蒸至35秒\n②35-45秒注水至188g，滴滤完成，" +
+      "芭蕾花魁2026埃塞俄比亚TOH冠军批次 精品手冲咖啡豆";
+    await useMockLlm([
+      {
+        content: JSON.stringify({
+          ...FULL_PARSED,
+          name: "•浅度烘焙",
+          origin: "埃塞俄比亚",
+          roastLevel: "浅度烘焙",
+          tastingNotes: ["水蜜桃", "覆盆子", "花蜜"],
+        }),
+      },
+    ]);
+    const { status, json } = await postParse({ text: source });
+    assert.equal(status, 200);
+    assert.equal(json.ok, true);
+    assert.equal(
+      (json.parsed as Record<string, unknown>).name,
+      "芭蕾花魁2026埃塞俄比亚TOH冠军批次",
+    );
+    assert.equal((json.parsed as Record<string, unknown>).roastLevel, "浅焙");
+    assert.equal(json.inputKind, "mixed");
+    assert.equal(json.roasterReference, source);
+  });
+
   it("LLM HTTP 500：200 + { ok:false, error } 结构化错误，绝不 5xx", async () => {
     await useMockLlm([{ status: 500 }]);
     const { status, json } = await postParse({ text: "任意文本" });
@@ -237,5 +265,40 @@ describe("烘焙度归一与输出清洗纯函数（任务 #118）", () => {
     assert.deepEqual(out!.tastingNotes, ["草莓", "蓝莓"]);
     assert.equal(sanitizeParsedBean({ name: 123 }), null, "schema 不符返回 null");
     assert.equal(sanitizeParsedBean("not-an-object"), null);
+  });
+
+  it("sanitizeParsedBean：类别词不作为豆名；没有明确商品名时保持空值", () => {
+    const out = sanitizeParsedBean({
+      name: "•浅度烘焙",
+      roaster: null,
+      origin: null,
+      estate: null,
+      process: null,
+      varietal: null,
+      roastLevel: "浅度烘焙",
+      tastingNotes: [],
+      altitude: null,
+      notes: null,
+    });
+    assert.ok(out);
+    assert.equal(out.name, null);
+    assert.equal(out.roastLevel, "浅焙");
+  });
+
+  it("sanitizeParsedBean：商品类型与描述句也不回退成豆名", () => {
+    const base = {
+      name: "浅度烘焙",
+      roaster: null,
+      origin: null,
+      estate: null,
+      process: null,
+      varietal: null,
+      roastLevel: "浅度烘焙",
+      tastingNotes: [],
+      altitude: null,
+      notes: null,
+    };
+    assert.equal(sanitizeParsedBean(base, "产品类型：精品手冲咖啡豆")?.name, null);
+    assert.equal(sanitizeParsedBean(base, "这是一款浅度烘焙的咖啡豆")?.name, null);
   });
 });

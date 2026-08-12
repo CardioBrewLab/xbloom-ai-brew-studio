@@ -47,6 +47,16 @@
 .\cloudflare\deploy-cloudflare.ps1 -WorkerName TARGET_WORKER -SkipDeploy
 ```
 
+### 小红书容量档位
+
+个人演示默认使用 `free` 档。准备公开运营并已启用 Workers Paid / Browser Run 后，使用：
+
+```powershell
+.\cloudflare\deploy-cloudflare.ps1 -XhsBrowserProfile scale
+```
+
+`scale` 档的站内保护值为全站每日 2500 次取码、20000 次检索；每位用户分别为 8 次和 100 次。它们是应用侧防滥用阈值，不是 Cloudflare 套餐额度。有效期内重复打开登录窗口会复用同一二维码，执行异常会退回本次站内计数；成功的小红书公开笔记结果按关键词摘要缓存 24 小时，缓存不保存搜索原文、用户标识或 Cookie。
+
 ## 可选共享模型（guest model）
 
 如果部署希望为尚未配置个人模型的访客提供默认体验，可以单独配置一个共享模型。它属于部署者管理的配置，不替代账号 BYOK。
@@ -62,18 +72,21 @@
 
 ## 密钥和数据边界
 
-| 项目                             | 所属方 / 用途                     | 保存边界                                        |
-| -------------------------------- | --------------------------------- | ----------------------------------------------- |
-| `APP_SESSION_SECRET`             | 部署的会话签名                    | Worker 密钥；升级时保持稳定                     |
-| `APP_PASSWORD_PEPPER`            | 账号校验值的独立 pepper           | Worker 密钥；升级时保持稳定                     |
-| `APP_DATA_ENCRYPTION_KEY`        | 加密模型、xBloom 和小红书登录凭据 | Worker 密钥；保持稳定，或提前规划密钥轮换/迁移  |
-| `EDGE_PROXY_SECRET`              | 验证 EdgeOne 到 Worker 的 Relay   | Worker 密钥和 EdgeOne 环境；两边的值保持一致    |
-| `XHS_BROWSER_QR_DAILY_LIMIT`     | 全站每日扫码/登录校验次数         | 普通变量；免费部署默认 `3`                      |
-| `XHS_BROWSER_SEARCH_DAILY_LIMIT` | 全站每日小红书检索次数            | 普通变量；免费部署默认 `20`                     |
-| 共享模型（guest model）密钥      | 可选的部署者备用配置              | Worker 密钥；不要放进浏览器代码或公开文档       |
-| 个人模型密钥                     | 账号持有者的 BYOK 凭证            | 密钥正文加密；URL 和模型名为 D1 业务字段        |
-| xBloom 凭据                      | 账号持有者的 xBloom 登录信息      | 外部会话载荷按用户加密                          |
-| 小红书 Cookie                    | 当前浏览器或账号的调研登录态      | D1 只保存 AES-GCM 密文；浏览器会话按 owner 隔离 |
+| 项目                              | 所属方 / 用途                     | 保存边界                                        |
+| --------------------------------- | --------------------------------- | ----------------------------------------------- |
+| `APP_SESSION_SECRET`              | 部署的会话签名                    | Worker 密钥；升级时保持稳定                     |
+| `APP_PASSWORD_PEPPER`             | 账号校验值的独立 pepper           | Worker 密钥；升级时保持稳定                     |
+| `APP_DATA_ENCRYPTION_KEY`         | 加密模型、xBloom 和小红书登录凭据 | Worker 密钥；保持稳定，或提前规划密钥轮换/迁移  |
+| `EDGE_PROXY_SECRET`               | 验证 EdgeOne 到 Worker 的 Relay   | Worker 密钥和 EdgeOne 环境；两边的值保持一致    |
+| `XHS_BROWSER_PROFILE`             | Browser Run 容量档                | `free` 或 `scale`                               |
+| `XHS_BROWSER_QR_DAILY_LIMIT`      | 全站每日扫码/登录校验次数         | `free` 默认 `3`；`scale` 默认 `2500`            |
+| `XHS_BROWSER_SEARCH_DAILY_LIMIT`  | 全站每日小红书检索次数            | `free` 默认 `20`；`scale` 默认 `20000`          |
+| `XHS_BROWSER_*_OWNER_DAILY_LIMIT` | 单用户每日取码/检索保护值         | `free` 为 `3/10`；`scale` 为 `8/100`            |
+| `XHS_RESEARCH_CACHE_TTL_SECONDS`  | 公开笔记结果缓存时间              | 默认 `86400` 秒；不缓存用户凭据和搜索原文       |
+| 共享模型（guest model）密钥       | 可选的部署者备用配置              | Worker 密钥；不要放进浏览器代码或公开文档       |
+| 个人模型密钥                      | 账号持有者的 BYOK 凭证            | 密钥正文加密；URL 和模型名为 D1 业务字段        |
+| xBloom 凭据                       | 账号持有者的 xBloom 登录信息      | 外部会话载荷按用户加密                          |
+| 小红书 Cookie                     | 当前浏览器或账号的调研登录态      | D1 只保存 AES-GCM 密文；浏览器会话按 owner 隔离 |
 
 Worker 运营者掌握 Worker、D1、密钥配置和运行日志。模型服务商会看到请求中的提示词和上下文。用户应避免把无关的个人信息放进冲煮笔记。账号 Cookie 和外部会话都属于当前浏览器/账号边界；共享电脑使用结束后请退出登录。
 
@@ -90,4 +103,4 @@ Worker 运营者掌握 Worker、D1、密钥配置和运行日志。模型服务�
 - 一个用户的模型设置、xBloom 会话和小红书 Cookie 应独立于另一个用户。发布前用两个账号验证这一点。
 - 模型服务和 xBloom 端点需要能从 Worker 的网络路径访问；浏览器本机的 localhost 地址属于本地版设置，不是 Hosted 模型目标。
 
-Browser Run 有独立的并发、分钟数和计费额度。状态查询通常只读 D1；存在待确认会话时会补查一次。取码、登录确认和实际检索会消耗浏览器时间。Workers Free 当前为每日 10 分钟，适合个人试用；Workers Paid 当前含每月 10 小时，超出部分为每浏览器小时 0.09 美元，同时还需计算 Workers 套餐本身。公开运营前请按 [Cloudflare Browser Run pricing](https://developers.cloudflare.com/browser-run/pricing/) 核对当期价格。
+Browser Run 有独立的并发、分钟数和计费额度。状态查询通常只读 D1；存在待确认会话时会补查一次。取码、登录确认和未命中缓存的实际检索会消耗浏览器时间。Workers Free 当前为每日 10 分钟、3 个并发，适合个人试用；Workers Paid 当前含每月 10 小时、默认最多 120 个并发，超出包含时长后为每浏览器小时 0.09 美元，同时还需计算 Workers 套餐本身。公开运营前请按 [Cloudflare Browser Run pricing](https://developers.cloudflare.com/browser-run/pricing/) 和 [Browser Run limits](https://developers.cloudflare.com/browser-run/limits/) 核对当期价格与容量。

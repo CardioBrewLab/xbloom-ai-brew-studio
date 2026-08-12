@@ -11,6 +11,7 @@ import { xhsQrFailureCopy, type XhsQrFailureKind } from "../lib/xhs-qr.js";
 import { btnGhost, btnPrimary, btnText, Modal, Spinner, StatusDot } from "./ui.js";
 import { createPortal } from "react-dom";
 import { hostedPage } from "../lib/companion.js";
+import { isMobileLoginSurface, xhsOfficialOpenUrl } from "../lib/xhs-mobile-login.js";
 
 /** 二维码展示态状态机 */
 type QrPhase = "idle" | "loading" | "code" | "expired" | "confirmed" | "already" | "error";
@@ -36,11 +37,19 @@ export default function XhsAccount({
   const [qrSrc, setQrSrc] = useState("");
   const [qrExpiresAt, setQrExpiresAt] = useState(0);
   const [qrHint, setQrHint] = useState("");
+  const [qrAppOpenUrl, setQrAppOpenUrl] = useState("");
   const [qrError, setQrError] = useState("");
   const [qrFailureKind, setQrFailureKind] = useState<XhsQrFailureKind>();
   const [busy, setBusy] = useState(false);
   const [confirmedName, setConfirmedName] = useState("");
   const [now, setNow] = useState(() => Date.now());
+  const [mobileSurface] = useState(() =>
+    isMobileLoginSurface({
+      userAgent: navigator.userAgent,
+      innerWidth: window.innerWidth,
+      maxTouchPoints: navigator.maxTouchPoints,
+    }),
+  );
 
   // ---- Cookie 导入兜底（任务 #97：扫码被风控拦截时的替代通道）----
   const [cookieText, setCookieText] = useState("");
@@ -94,6 +103,7 @@ export default function XhsAccount({
     setQrError("");
     setQrFailureKind(undefined);
     setQrSrc("");
+    setQrAppOpenUrl("");
     setQrHint("");
     setQrExpiresAt(0);
     try {
@@ -115,13 +125,16 @@ export default function XhsAccount({
       setQrExpiresAt(r.expiresAt);
       setQrHint(r.hint ?? "");
       setQrPhase("code");
+      const appOpenUrl = xhsOfficialOpenUrl(r.launchUrl);
+      setQrAppOpenUrl(appOpenUrl);
+      if (mobileSurface && appOpenUrl) window.location.assign(appOpenUrl);
     } catch (e) {
       if (!modalOpenRef.current || requestId !== qrRequestIdRef.current) return;
       setQrPhase("error");
       setQrFailureKind(xhsFailureKindFromError(e) ?? "unknown");
       setQrError((e as Error).message);
     }
-  }, []);
+  }, [mobileSurface]);
 
   /** 登出并切换账号：delete_cookies 成功后立即取新码（二次确认，防误触） */
   const logoutAndSwitch = useCallback(async () => {
@@ -148,18 +161,26 @@ export default function XhsAccount({
     return () => clearInterval(id);
   }, [qrPhase]);
 
-  // 轮询确认：上一次结束后再等待 2.5s，避免 MCP 慢响应时请求重叠。
+  // 轮询确认：上一次结束后再等待 2.5s；从 App 返回页面时立即补查一次。
   useEffect(() => {
     if (qrPhase !== "code") return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let inFlight = false;
+    const scheduleNext = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
+    };
     const poll = async () => {
+      if (inFlight) return;
       if (Date.now() >= qrExpiresAt) {
         if (!cancelled) setQrPhase("expired");
         return;
       }
+      inFlight = true;
       try {
         const r = await api.xhsPoll();
+        if (!cancelled) setStatus(r);
         if (!cancelled && r.loggedIn) {
           setConfirmedName(r.nickname ?? "");
           setQrPhase("confirmed");
@@ -169,15 +190,60 @@ export default function XhsAccount({
         }
       } catch {
         // 单次轮询失败后退避重试，二维码主状态仍保留。
+      } finally {
+        inFlight = false;
       }
-      if (!cancelled) timer = setTimeout(poll, POLL_INTERVAL_MS);
+      if (!cancelled) scheduleNext();
     };
-    timer = setTimeout(poll, POLL_INTERVAL_MS);
+    const pollAfterAppReturn = () => {
+      if (document.visibilityState === "visible") {
+        if (timer) clearTimeout(timer);
+        timer = undefined;
+        void poll();
+      }
+    };
+    scheduleNext();
+    document.addEventListener("visibilitychange", pollAfterAppReturn);
+    window.addEventListener("pageshow", pollAfterAppReturn);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", pollAfterAppReturn);
+      window.removeEventListener("pageshow", pollAfterAppReturn);
+    };
+  }, [qrPhase, qrExpiresAt]);
+
+  // 移动系统若回收了网页，重新载入后根据后端保留的二维码会话继续确认，而非重新取码。
+  useEffect(() => {
+    if (qrPhase === "code" || !status?.pendingLogin || status.loggedIn || !status.expiresAt) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const resume = async () => {
+      if (Date.now() >= status.expiresAt!) {
+        if (!cancelled) void refreshStatusRef.current();
+        return;
+      }
+      try {
+        const next = await api.xhsPoll();
+        if (cancelled) return;
+        setStatus(next);
+        if (next.loggedIn) {
+          setConfirmedName(next.nickname ?? "");
+          setQrPhase("confirmed");
+          onClearExpiredRef.current();
+          return;
+        }
+      } catch {
+        // 保留后端 Browser Run 会话，在有效期内继续补查。
+      }
+      if (!cancelled) timer = setTimeout(resume, POLL_INTERVAL_MS);
+    };
+    timer = setTimeout(resume, POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [qrPhase, qrExpiresAt]);
+  }, [qrPhase, status?.expiresAt, status?.loggedIn, status?.pendingLogin]);
 
   const openModal = () => {
     operationIdRef.current += 1;
@@ -240,9 +306,11 @@ export default function XhsAccount({
       ? "小红书 · 已过期"
       : offline || status === null
         ? "小红书 · 服务离线"
-        : status?.checkFailed
-          ? "小红书 · 状态未知"
-          : "小红书 · 未登录";
+        : status?.pendingLogin
+          ? "小红书 · 确认中"
+          : status?.checkFailed
+            ? "小红书 · 状态未知"
+            : "小红书 · 未登录";
 
   const remainingSec = Math.max(0, Math.round((qrExpiresAt - now) / 1000));
   const qrFailure = xhsQrFailureCopy(qrFailureKind);
@@ -312,6 +380,10 @@ export default function XhsAccount({
                       <span className="font-medium text-[var(--sage-deep)]">已登录</span>
                       {status.nickname ? ` · ${status.nickname}` : ""}
                     </span>
+                  ) : status.pendingLogin ? (
+                    <span className="text-[var(--tx-2)]">
+                      已收到扫码会话，正在同步小红书登录状态…
+                    </span>
                   ) : status.checkFailed ? (
                     <span className="text-[var(--tx-2)]">
                       登录状态检查失败（浏览器异常等），可尝试重新扫码
@@ -331,6 +403,7 @@ export default function XhsAccount({
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-[var(--line)] px-5 py-3">
                   {status?.online !== false &&
                     !loggedIn &&
+                    !status?.pendingLogin &&
                     qrPhase !== "code" &&
                     qrPhase !== "loading" && (
                       <button
@@ -339,7 +412,13 @@ export default function XhsAccount({
                         onClick={() => void fetchQrcode()}
                         disabled={busy}
                       >
-                        {showExpiredAlert ? "重新扫码登录" : "扫码登录"}
+                        {showExpiredAlert
+                          ? mobileSurface
+                            ? "重新打开小红书登录"
+                            : "重新扫码登录"
+                          : mobileSurface
+                            ? "打开小红书登录"
+                            : "扫码登录"}
                       </button>
                     )}
                   {loggedIn && qrPhase !== "code" && qrPhase !== "loading" && (
@@ -378,6 +457,14 @@ export default function XhsAccount({
               {/* ---- 二维码流程区（任务 #126：视觉整合进同一卡片体系）---- */}
               {qrPhase === "code" && (
                 <div className="card-surface animate-fade-up flex flex-col items-center gap-3 rounded-[14px] border border-[var(--line)] bg-[var(--bg-card)] px-5 py-6">
+                  {mobileSurface && qrAppOpenUrl && (
+                    <a
+                      href={qrAppOpenUrl}
+                      className={`${btnPrimary} w-full justify-center py-3 text-sm`}
+                    >
+                      打开小红书 App 确认登录
+                    </a>
+                  )}
                   <img
                     src={qrSrc}
                     alt="小红书登录二维码"
@@ -388,8 +475,11 @@ export default function XhsAccount({
                       setQrPhase("error");
                     }}
                   />
-                  <p className="text-xs text-[var(--tx-2)]">
-                    打开小红书 App 扫一扫确认登录 ·{" "}
+                  <p className="text-center text-xs text-[var(--tx-2)]">
+                    {mobileSurface && qrAppOpenUrl
+                      ? "确认后返回本页，登录状态会自动同步"
+                      : "打开小红书 App 扫一扫确认登录"}{" "}
+                    ·{" "}
                     <span className="tnum font-medium text-[var(--tx-1)]">
                       {Math.floor(remainingSec / 60)}:{String(remainingSec % 60).padStart(2, "0")}
                     </span>{" "}
@@ -397,8 +487,9 @@ export default function XhsAccount({
                   </p>
                   {/* 任务 #89：MCP 同一时刻只保留一个扫码会话，换码即作废旧码 —— 防用户扫码中途换码导致手机端 failed to login */}
                   <p className="text-[11px] text-[var(--warn)]">
-                    二维码只能扫一次：扫码确认前请勿点「换一张」，否则本张码立即失效（手机端会报
-                    failed to login）
+                    {mobileSurface && qrAppOpenUrl
+                      ? "跳转后请完成本次确认；返回网页前不要重新取码。"
+                      : "二维码只对应本次登录：确认前请勿点「换一张」，否则旧码会立即作废。"}
                   </p>
                   {qrHint && <p className="text-[11px] text-[var(--tx-3)]">{qrHint}</p>}
                 </div>

@@ -296,6 +296,10 @@ export interface XhsStatus {
   nickname?: string;
   /** true = 服务在线但登录态检查本身失败（浏览器异常等），前端展示「状态未知」 */
   checkFailed?: boolean;
+  /** 扫码已发起且 Browser Run 会话仍在等待确认。 */
+  pendingLogin?: boolean;
+  /** 待确认会话的失效时刻（毫秒时间戳）。 */
+  expiresAt?: number;
   failureKind?: XhsQrFailureKind;
   message?: string;
 }
@@ -310,6 +314,8 @@ export interface XhsQrcode {
   qrcode?: string;
   /** 二维码失效时刻（毫秒时间戳） */
   expiresAt?: number;
+  /** 小红书登录接口返回的原生 App deeplink；手机端经官方 OIA 入口唤起。 */
+  launchUrl?: string;
   hint?: string;
   failureKind?: XhsQrFailureKind;
   message?: string;

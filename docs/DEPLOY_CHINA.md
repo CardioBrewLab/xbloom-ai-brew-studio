@@ -1,5 +1,18 @@
 # 中国网络入口（EdgeOne Makers + Cloudflare Worker）
 
+## 先看结论
+
+`*.workers.dev` 是 Cloudflare 的全球技术入口，不应直接作为中国大陆客户网址；部分大陆运营商网络会连接超时或要求切换网络。EdgeOne 的 `*.edgeone.cool` 系统项目域名也不是正式公开域名：中国大陆或全球（含中国大陆）项目只接受约 3 小时有效的预览令牌，全球（不含中国大陆）项目会在大陆网络返回 401。
+
+长期公开入口使用以下组合：
+
+1. 自有域名完成 ICP 备案；
+2. 域名绑定到 EdgeOne Makers 的中国大陆或全球（含中国大陆）环境；
+3. 静态界面与 `/api/*` 继续走本页的 EdgeOne → Pages Relay → Worker 链路；
+4. Worker、D1、Browser Run 和每位用户自己的 BYOK 配置保持不变。
+
+这不是前端代码或浏览器 UA 造成的故障，替换页面跳转脚本也不会改变线路结果。腾讯云官方同样把 CloudBase 默认域名限定为开发测试，并要求生产环境使用已备案自定义域名。尚在备案期时，EdgeOne 预览链接只用于短时验收，不写入发布文案。
+
 这套部署把职责拆成四段，全部运行在云端：
 
 - **EdgeOne Makers**：返回 `web/dist` 静态界面，并由 Cloud Function 接收 `/api/*`；
@@ -53,6 +66,18 @@ Pages Relay 不保存数据，也不解密模型 Key；账号、配方、豆库�
 - 选择全球（不含中国大陆）区域时，系统项目域名可从中国大陆以外网络直接访问，中国大陆网络访问会返回 401；
 - 稳定公开使用需要绑定自己的域名；选择中国大陆或全球（含中国大陆）节点时，域名需先完成 ICP 备案；
 - 尚无备案域名时，可先将自定义域名关联到全球（不含中国大陆）环境，并保留 Cloudflare 地址作为技术验收入口。
+
+### 没有域名时的测试入口
+
+腾讯云 SCF Web 函数会生成默认函数 URL，并原生支持 SSE，适合在备案期间做大陆网络短期验收。它属于按量计费服务：截至 2026-08 的官方价格中，中国大陆 Web 函数响应/外网流量为 `0.80 元/GB`，响应流量不在免费额度内，因此它不作为本项目默认的公开入口。正式发布仍使用已备案自定义域名 + EdgeOne。
+
+官方依据：
+
+- [EdgeOne 接入与中国大陆备案要求](https://edgeone.ai/document/zh/54208)
+- [EdgeOne Pages 自定义域名说明](https://edgeone.ai/document/159687579672338432)
+- [CloudBase 默认域名与生产环境边界](https://cloud.tencent.com/document/product/876/130728)
+- [SCF Web 函数 SSE 支持](https://cloud.tencent.com/document/product/583/90617)
+- [SCF 当前计费项与价格](https://cloud.tencent.com/document/product/583/12281)
 
 不要把 `*.edgeone.cool` 的无令牌地址写进发布文案或当作客户入口。控制台表格中的预览 URL 含临时访问凭据，也不要提交到仓库、issue 或截图。
 

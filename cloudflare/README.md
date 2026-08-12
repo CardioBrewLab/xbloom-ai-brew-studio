@@ -68,7 +68,7 @@
 | `APP_PASSWORD_PEPPER`            | 账号校验值的独立 pepper           | Worker 密钥；升级时保持稳定                     |
 | `APP_DATA_ENCRYPTION_KEY`        | 加密模型、xBloom 和小红书登录凭据 | Worker 密钥；保持稳定，或提前规划密钥轮换/迁移  |
 | `EDGE_PROXY_SECRET`              | 验证 EdgeOne 到 Worker 的 Relay   | Worker 密钥和 EdgeOne 环境；两边的值保持一致    |
-| `XHS_BROWSER_QR_DAILY_LIMIT`     | 全站每日扫码/登录校验次数         | 普通变量；免费部署默认 `6`                      |
+| `XHS_BROWSER_QR_DAILY_LIMIT`     | 全站每日扫码/登录校验次数         | 普通变量；免费部署默认 `3`                      |
 | `XHS_BROWSER_SEARCH_DAILY_LIMIT` | 全站每日小红书检索次数            | 普通变量；免费部署默认 `20`                     |
 | 共享模型（guest model）密钥      | 可选的部署者备用配置              | Worker 密钥；不要放进浏览器代码或公开文档       |
 | 个人模型密钥                     | 账号持有者的 BYOK 凭证            | 密钥正文加密；URL 和模型名为 D1 业务字段        |
@@ -90,4 +90,4 @@ Worker 运营者掌握 Worker、D1、密钥配置和运行日志。模型服务�
 - 一个用户的模型设置、xBloom 会话和小红书 Cookie 应独立于另一个用户。发布前用两个账号验证这一点。
 - 模型服务和 xBloom 端点需要能从 Worker 的网络路径访问；浏览器本机的 localhost 地址属于本地版设置，不是 Hosted 模型目标。
 
-Browser Run 有独立的并发、分钟数和计费额度。状态查询只读 D1，不启动浏览器；取码、登录确认和实际检索才消耗浏览器时间。公开运营前请按 [Cloudflare Browser Run pricing](https://developers.cloudflare.com/browser-run/pricing/) 核对当前套餐。
+Browser Run 有独立的并发、分钟数和计费额度。状态查询通常只读 D1；存在待确认会话时会补查一次。取码、登录确认和实际检索会消耗浏览器时间。Workers Free 当前为每日 10 分钟，适合个人试用；Workers Paid 当前含每月 10 小时，超出部分为每浏览器小时 0.09 美元，同时还需计算 Workers 套餐本身。公开运营前请按 [Cloudflare Browser Run pricing](https://developers.cloudflare.com/browser-run/pricing/) 核对当期价格。

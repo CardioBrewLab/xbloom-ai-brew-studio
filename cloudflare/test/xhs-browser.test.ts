@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import { claimBrowserBudget, parseCookieHeader, parseXhsSearchFeeds } from "../src/xhs-browser.ts";
+import {
+  claimBrowserBudget,
+  extractXhsLoginLaunchUrl,
+  hasXhsAuthenticatedCookies,
+  normalizeXhsLoginLaunchUrl,
+  parseCookieHeader,
+  parseXhsSearchFeeds,
+} from "../src/xhs-browser.ts";
 
 function budgetDb(): D1Database {
   const counts = new Map<string, number>();
@@ -65,4 +72,37 @@ it("单个 owner 超限后不再消耗全站 Browser Run 名额", async () => {
   assert.equal(await claimBrowserBudget(env, "owner-a", "qr"), false);
   assert.equal(await claimBrowserBudget(env, "owner-b", "qr"), true);
   assert.equal(await claimBrowserBudget(env, "owner-c", "qr"), false);
+});
+
+it("使用完整会话 Cookie 判定扫码已经确认", () => {
+  assert.equal(
+    hasXhsAuthenticatedCookies([
+      { name: "a1", value: "A" },
+      { name: "webId", value: "W" },
+      { name: "web_session", value: "S" },
+    ]),
+    true,
+  );
+  assert.equal(
+    hasXhsAuthenticatedCookies([
+      { name: "a1", value: "A" },
+      { name: "webId", value: "W" },
+    ]),
+    false,
+  );
+});
+
+it("提取并严格校验小红书登录 deeplink", () => {
+  const link =
+    "xhsdiscover://rn/app-settings/login/scan?qrId=qr-1&ruleId=4&code=code-1&timestamp=1700000000";
+  assert.equal(extractXhsLoginLaunchUrl({ data: { url: link } }), link);
+  assert.equal(extractXhsLoginLaunchUrl({ response: { data: { url: link } } }), link);
+  assert.equal(normalizeXhsLoginLaunchUrl("xhsdiscover://scan"), "");
+  assert.equal(
+    normalizeXhsLoginLaunchUrl(
+      "xhsdiscover://rn:443/app-settings/login/scan?qrId=qr-1&code=code-1&timestamp=1700000000",
+    ),
+    "",
+  );
+  assert.equal(extractXhsLoginLaunchUrl({ data: { url: "https://attacker.example/" } }), "");
 });

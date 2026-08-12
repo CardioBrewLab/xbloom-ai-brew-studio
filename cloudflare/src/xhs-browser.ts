@@ -35,7 +35,10 @@ const XHS_ORIGIN = "https://www.xiaohongshu.com";
 const XHS_EXPLORE_URL = `${XHS_ORIGIN}/explore`;
 const LOGIN_SELECTOR = ".main-container .user .link-wrapper .channel";
 const QR_SELECTOR = ".login-container .qrcode-img";
-const QR_LIFETIME_MS = 3 * 60_000;
+const QR_CREATE_API = "/api/sns/web/v1/login/qrcode/create";
+const XHS_LOGIN_DEEP_LINK_HOST = "rn";
+const XHS_LOGIN_DEEP_LINK_PATH = "/app-settings/login/scan";
+const QR_LIFETIME_MS = 210_000;
 const BROWSER_KEEP_ALIVE_MS = 4 * 60_000;
 const NAVIGATION_TIMEOUT_MS = 35_000;
 const USER_AGENT =
@@ -56,7 +59,7 @@ export async function claimBrowserBudget(
 ): Promise<boolean> {
   const globalLimit = positiveLimit(
     kind === "qr" ? env.XHS_BROWSER_QR_DAILY_LIMIT : env.XHS_BROWSER_SEARCH_DAILY_LIMIT,
-    kind === "qr" ? 6 : 20,
+    kind === "qr" ? 3 : 20,
   );
   const ownerLimit = Math.min(globalLimit, kind === "qr" ? 3 : 10);
   const bucket = `xhs-${kind}:${new Date().toISOString().slice(0, 10)}`;
@@ -80,6 +83,21 @@ export async function claimBrowserBudget(
     .bind(globalSubject, bucket)
     .first<{ request_count: number }>();
   return (globalRow?.request_count ?? globalLimit + 1) <= globalLimit;
+}
+
+async function releaseBrowserBudget(
+  env: XhsBrowserEnv,
+  owner: string,
+  kind: BrowserBudgetKind,
+): Promise<void> {
+  const bucket = `xhs-${kind}:${new Date().toISOString().slice(0, 10)}`;
+  for (const subject of [`xhs-${kind}:owner:${owner}`, `xhs-${kind}:global`]) {
+    await env.DB.prepare(
+      "UPDATE generation_usage SET request_count=MAX(request_count-1,0) WHERE owner=? AND hour_bucket=?",
+    )
+      .bind(subject, bucket)
+      .run();
+  }
 }
 
 function json(body: unknown, status = 200): Response {
@@ -236,6 +254,62 @@ export function parseCookieHeader(value: string): CookieParam[] {
   return cookies.slice(0, 120);
 }
 
+/**
+ * 小红书网页登录完成后至少会落下这三个会话 Cookie。只看头像 DOM 会受页面改版、
+ * hydration 时序与 AB 实验影响，因此把 Cookie 作为独立的登录完成信号。
+ */
+export function hasXhsAuthenticatedCookies(
+  cookies: ReadonlyArray<{ name: string; value: string }>,
+): boolean {
+  const names = new Set(
+    cookies.filter((cookie) => cookie.value.trim()).map((cookie) => cookie.name.toLowerCase()),
+  );
+  return names.has("a1") && names.has("webid") && names.has("web_session");
+}
+
+/** 仅放行小红书登录接口自身返回的扫码 deeplink，避免把任意协议交给浏览器跳转。 */
+export function normalizeXhsLoginLaunchUrl(value: unknown): string {
+  if (typeof value !== "string" || value.length > 4_096) return "";
+  const candidate = value.trim();
+  try {
+    const parsed = new URL(candidate);
+    if (
+      parsed.protocol !== "xhsdiscover:" ||
+      parsed.hostname !== XHS_LOGIN_DEEP_LINK_HOST ||
+      parsed.pathname !== XHS_LOGIN_DEEP_LINK_PATH ||
+      parsed.username ||
+      parsed.password ||
+      parsed.port ||
+      parsed.hash
+    ) {
+      return "";
+    }
+    if (
+      !parsed.searchParams.get("qrId") ||
+      !parsed.searchParams.get("code") ||
+      !parsed.searchParams.get("timestamp")
+    ) {
+      return "";
+    }
+    return candidate;
+  } catch {
+    return "";
+  }
+}
+
+/** 兼容小红书接口常见的 data.url / response.data.url 包装。 */
+export function extractXhsLoginLaunchUrl(payload: unknown, depth = 0): string {
+  if (depth > 4 || !payload || typeof payload !== "object" || Array.isArray(payload)) return "";
+  const record = payload as Record<string, unknown>;
+  const direct = normalizeXhsLoginLaunchUrl(record.url);
+  if (direct) return direct;
+  for (const key of ["data", "response", "body", "result"] as const) {
+    const nested = extractXhsLoginLaunchUrl(record[key], depth + 1);
+    if (nested) return nested;
+  }
+  return "";
+}
+
 function stringField(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -282,8 +356,38 @@ async function currentNickname(page: Page): Promise<string> {
   });
 }
 
-async function loggedIn(page: Page): Promise<boolean> {
-  return Boolean(await page.$(LOGIN_SELECTOR));
+async function authenticatedInitialState(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const root = globalThis as unknown as {
+      __INITIAL_STATE__?: { user?: { userInfo?: unknown } };
+    };
+    const raw = root.__INITIAL_STATE__?.user?.userInfo as
+      { value?: unknown; _value?: unknown } | undefined;
+    const info = (raw?.value ?? raw?._value ?? raw) as
+      { guest?: unknown; userId?: unknown; user_id?: unknown; nickname?: unknown } | undefined;
+    const present = (value: unknown) => typeof value === "string" && value.trim().length > 0;
+    return Boolean(
+      info &&
+      info.guest !== true &&
+      (present(info.userId) || present(info.user_id) || present(info.nickname)),
+    );
+  });
+}
+
+async function authenticatedCookies(page: Page): Promise<CookieParam[] | null> {
+  const cookies = await page.cookies(XHS_ORIGIN);
+  const selectorReady = Boolean(await page.$(LOGIN_SELECTOR));
+  const stateReady = await authenticatedInitialState(page).catch(() => false);
+  return selectorReady || stateReady || hasXhsAuthenticatedCookies(cookies) ? cookies : null;
+}
+
+async function waitForAuthenticatedCookies(page: Page): Promise<CookieParam[] | null> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const cookies = await authenticatedCookies(page);
+    if (cookies && hasXhsAuthenticatedCookies(cookies)) return cookies;
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  return null;
 }
 
 async function requestObject(request: Request): Promise<Record<string, unknown>> {
@@ -297,9 +401,24 @@ async function requestObject(request: Request): Promise<Record<string, unknown>>
 
 function publicFailure(error: unknown): string {
   const message = String((error as Error)?.message ?? error);
+  if (/429|rate limit/i.test(message))
+    return "云端登录窗口已达到当前 Browser Run 额度；短期限频请稍后重试，免费日额度耗尽后次日恢复";
   if (/timeout|timed out/i.test(message)) return "云端登录浏览器响应超时，请稍后重试";
   if (/session|connect/i.test(message)) return "登录二维码已失效，请重新取码";
   return "小红书云端浏览器本次执行异常，请稍后重试";
+}
+
+function logBrowserFailure(operation: "qrcode" | "poll" | "cookie-import", error: unknown): void {
+  const value = error as { name?: unknown; message?: unknown };
+  // 只记录错误类别与裁剪后的运行时消息，不写 owner、Cookie、二维码或请求参数。
+  console.error("xhs-browser-operation-failed", {
+    operation,
+    errorName: typeof value?.name === "string" ? value.name.slice(0, 80) : "Error",
+    errorMessage:
+      typeof value?.message === "string"
+        ? value.message.replace(/[\r\n]+/g, " ").slice(0, 500)
+        : "",
+  });
 }
 
 async function status(env: XhsBrowserEnv, owner: string): Promise<Response> {
@@ -312,10 +431,19 @@ async function status(env: XhsBrowserEnv, owner: string): Promise<Response> {
     });
   }
   const row = await sessionRow(env, owner);
+  if (!row?.encrypted_cookies && row?.qr_session_id && row.qr_expires_at > Date.now()) {
+    // 手机从小红书 App 返回后即便网页被系统重载，也会从保留的 Browser Run 会话补做确认。
+    return poll(env, owner);
+  }
+  if (row?.qr_session_id && row.qr_expires_at <= Date.now()) {
+    await closeBrowserSession(env, row.qr_session_id);
+    await clearQrState(env, owner);
+  }
   return json({
     ok: true,
     online: true,
     loggedIn: Boolean(row?.encrypted_cookies),
+    pendingLogin: false,
     ...(row?.nickname ? { nickname: row.nickname } : {}),
     message: row?.encrypted_cookies ? "云端登录态已保存" : "可直接扫码登录",
   });
@@ -345,18 +473,30 @@ async function qrcode(env: XhsBrowserEnv, owner: string): Promise<Response> {
     browser = await launchBrowser(env);
     const page = await browser.newPage();
     await preparePage(page);
+    const qrResponsePromise = page
+      .waitForResponse(
+        (response) =>
+          response.url().includes(QR_CREATE_API) && response.request().method() === "POST",
+        { timeout: 5_000 },
+      )
+      .catch(() => null);
     await page.goto(XHS_EXPLORE_URL, { waitUntil: "domcontentloaded" });
-    if (await loggedIn(page)) {
-      await saveLoggedInSession(
-        env,
-        owner,
-        await page.cookies(XHS_ORIGIN),
-        await currentNickname(page),
-      );
+    const existingCookies = await waitForAuthenticatedCookies(page);
+    if (existingCookies) {
+      await saveLoggedInSession(env, owner, existingCookies, await currentNickname(page));
       return json({ ok: true, online: true, alreadyLoggedIn: true });
     }
     const element = await page.waitForSelector(QR_SELECTOR, { timeout: 20_000 });
     if (!element) throw new Error("qrcode selector missing");
+    // deeplink 是手机端增强项；即使接口结构临时变化，也先把已经可见的二维码交给桌面端。
+    const qrResponse = await Promise.race([
+      qrResponsePromise,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 1_200)),
+    ]);
+    let launchUrl = "";
+    if (qrResponse) {
+      launchUrl = extractXhsLoginLaunchUrl(await qrResponse.json().catch(() => null));
+    }
     const encoded = await element.screenshot({ encoding: "base64" });
     const expiresAt = Date.now() + QR_LIFETIME_MS;
     await saveQrSession(env, owner, browser.sessionId(), expiresAt);
@@ -366,9 +506,12 @@ async function qrcode(env: XhsBrowserEnv, owner: string): Promise<Response> {
       online: true,
       qrcode: `data:image/png;base64,${encoded}`,
       expiresAt,
+      ...(launchUrl ? { launchUrl } : {}),
       hint: "二维码和登录态只属于当前浏览器或账号",
     });
   } catch (error) {
+    if (!browser) await releaseBrowserBudget(env, owner, "qr").catch(() => {});
+    logBrowserFailure("qrcode", error);
     return json(
       { ok: false, online: true, failureKind: "service_error", message: publicFailure(error) },
       502,
@@ -388,6 +531,7 @@ async function poll(env: XhsBrowserEnv, owner: string): Promise<Response> {
     return json({ ok: true, online: true, loggedIn: true, nickname: row.nickname || undefined });
   }
   if (!row?.qr_session_id || row.qr_expires_at <= Date.now()) {
+    await closeBrowserSession(env, row?.qr_session_id ?? "");
     await clearQrState(env, owner);
     return json({ ok: true, online: true, loggedIn: false, message: "二维码已失效" });
   }
@@ -399,19 +543,34 @@ async function poll(env: XhsBrowserEnv, owner: string): Promise<Response> {
     const pages = await browser.pages();
     const page = pages.at(-1);
     if (!page) throw new Error("browser session page missing");
-    if (!(await loggedIn(page))) {
+    const cookies = await waitForAuthenticatedCookies(page);
+    if (!cookies) {
       await browser.disconnect();
       browser = null;
-      return json({ ok: true, online: true, loggedIn: false });
+      return json({
+        ok: true,
+        online: true,
+        loggedIn: false,
+        pendingLogin: true,
+        expiresAt: row.qr_expires_at,
+      });
     }
     const nickname = await currentNickname(page);
-    await saveLoggedInSession(env, owner, await page.cookies(XHS_ORIGIN), nickname);
+    await saveLoggedInSession(env, owner, cookies, nickname);
     await browser.close();
     browser = null;
     return json({ ok: true, online: true, loggedIn: true, nickname: nickname || undefined });
   } catch (error) {
-    await clearQrState(env, owner);
-    return json({ ok: true, online: true, loggedIn: false, message: publicFailure(error) });
+    logBrowserFailure("poll", error);
+    return json({
+      ok: true,
+      online: true,
+      loggedIn: false,
+      pendingLogin: true,
+      expiresAt: row.qr_expires_at,
+      checkFailed: true,
+      message: publicFailure(error),
+    });
   } finally {
     if (browser) await browser.disconnect().catch(() => {});
   }
@@ -436,12 +595,13 @@ async function cookieImport(
     await preparePage(page);
     await page.setCookie(...cookies);
     await page.goto(XHS_EXPLORE_URL, { waitUntil: "domcontentloaded" });
-    if (!(await loggedIn(page))) return json({ ok: false, message: "Cookie 未通过登录校验" }, 401);
+    const verified = await waitForAuthenticatedCookies(page);
+    if (!verified) return json({ ok: false, message: "Cookie 未通过登录校验" }, 401);
     const nickname = await currentNickname(page);
-    const verified = await page.cookies(XHS_ORIGIN);
     await saveLoggedInSession(env, owner, verified, nickname);
     return json({ ok: true, online: true, loggedIn: true, nickname: nickname || undefined });
   } catch (error) {
+    logBrowserFailure("cookie-import", error);
     return json({ ok: false, message: publicFailure(error) }, 502);
   } finally {
     await browser?.close().catch(() => {});
@@ -513,7 +673,7 @@ export async function researchXhsWithBrowser(
       return raw?.value ?? raw?._value ?? raw ?? [];
     });
     const sources = parseXhsSearchFeeds(feedValue);
-    const stillLoggedIn = await loggedIn(page);
+    const stillLoggedIn = Boolean(await waitForAuthenticatedCookies(page));
     if (!stillLoggedIn && sources.length === 0) {
       await env.DB.prepare(
         "UPDATE xhs_browser_sessions SET encrypted_cookies='',nickname='',updated_at=? WHERE owner=?",

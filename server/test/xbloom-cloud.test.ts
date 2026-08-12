@@ -31,6 +31,7 @@ const {
   isAuthFailureResponse,
   loadSession,
   maskEmail,
+  paginateRecipePages,
   parseRecipeVo,
   postJson,
   rsaEncrypt,
@@ -68,6 +69,46 @@ describe("shareId ↔ base64(tableId) 往返", () => {
 
   it("分享链接格式为 share-h5.xbloom.com/?id=<base64>", () => {
     assert.equal(buildShareUrl(12345), "https://share-h5.xbloom.com/?id=MTIzNDU%3D");
+  });
+});
+
+describe("配方列表分页", () => {
+  it("分页读取有上限、遇到短页停止并按 tableId 去重", async () => {
+    const requestedPages: number[] = [];
+    const rows = await paginateRecipePages(
+      async (pageNumber, countPerPage) => {
+        requestedPages.push(pageNumber);
+        assert.equal(countPerPage, 2);
+        const pages: Record<string, unknown>[][] = [
+          [{ tableId: 1 }, { tableId: 2 }],
+          [{ tableId: 2 }, { tableId: 3 }],
+          [{ tableId: 4 }],
+        ];
+        return pages[pageNumber - 1] ?? [];
+      },
+      { countPerPage: 2, maxPages: 5 },
+    );
+    assert.deepEqual(
+      rows.map((row) => row.tableId),
+      [1, 2, 3, 4],
+    );
+    assert.deepEqual(requestedPages, [1, 2, 3]);
+  });
+
+  it("重复满页响应也在 maxPages 内停止", async () => {
+    let calls = 0;
+    const rows = await paginateRecipePages(
+      async () => {
+        calls += 1;
+        return [{ tableId: 9 }, { tableId: 10 }];
+      },
+      { countPerPage: 2, maxPages: 3 },
+    );
+    assert.equal(calls, 2);
+    assert.deepEqual(
+      rows.map((row) => row.tableId),
+      [9, 10],
+    );
   });
 });
 

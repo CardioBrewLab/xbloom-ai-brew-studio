@@ -267,6 +267,25 @@ describe("烘焙度归一与输出清洗纯函数（任务 #118）", () => {
     assert.equal(sanitizeParsedBean("not-an-object"), null);
   });
 
+  it("sanitizeParsedBean：LLM 省略可选豆字段时补齐 null 与空风味数组", () => {
+    const out = sanitizeParsedBean({
+      name: "Kenya AA",
+      origin: "Kenya",
+      tastingNotes: ["blackcurrant"],
+    });
+    assert.ok(out);
+    assert.equal(out!.name, "Kenya AA");
+    assert.equal(out!.origin, "Kenya");
+    assert.equal(out!.roaster, null);
+    assert.equal(out!.estate, null);
+    assert.equal(out!.process, null);
+    assert.equal(out!.varietal, null);
+    assert.equal(out!.roastLevel, null);
+    assert.equal(out!.altitude, null);
+    assert.equal(out!.notes, null);
+    assert.deepEqual(out!.tastingNotes, ["blackcurrant"]);
+  });
+
   it("sanitizeParsedBean：类别词不作为豆名；没有明确商品名时保持空值", () => {
     const out = sanitizeParsedBean({
       name: "•浅度烘焙",

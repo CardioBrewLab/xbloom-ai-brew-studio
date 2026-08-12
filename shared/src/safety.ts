@@ -18,6 +18,7 @@ import {
   RPM_OPTIONS,
   RecipeSchema,
   SAFE_LIMITS,
+  isReachableCloudTotal,
   type LimitRange,
   type LimitTable,
   type Pour,
@@ -76,6 +77,25 @@ function round1(value: number): number {
   return Math.round(value * 10) / 10;
 }
 
+function nearestReachableTotalInRange(
+  doseGrams: number,
+  desired: number,
+  minTotal: number,
+  maxTotal: number,
+): number | null {
+  const lower = Math.ceil(minTotal - EPS);
+  const upper = Math.floor(maxTotal + EPS);
+  if (lower > upper) return null;
+  const center = Math.min(upper, Math.max(lower, Math.round(desired)));
+  for (let distance = 0; distance <= upper - lower; distance += 1) {
+    const down = center - distance;
+    if (down >= lower && isReachableCloudTotal(doseGrams, down)) return down;
+    const up = center + distance;
+    if (up <= upper && isReachableCloudTotal(doseGrams, up)) return up;
+  }
+  return null;
+}
+
 /**
  * 将配方钳位到 SAFE_LIMITS。
  *
@@ -132,33 +152,65 @@ export function clampRecipe(input: unknown): ClampResult {
   );
 
   let sum = round1(pours.reduce((s, p) => s + p.volume, 0));
+  const rebalancePours = (target: number): void => {
+    if (
+      target < pours.length * SAFE_LIMITS.pourVolume.min ||
+      target > pours.length * SAFE_LIMITS.pourVolume.max
+    ) {
+      throw new Error(
+        `clampRecipe: ${target}ml exceeds the per-pour capacity for ${pours.length} pours`,
+      );
+    }
+    if (sum <= 0) throw new Error("clampRecipe: pour volume sum must be positive");
+
+    const scale = target / sum;
+    pours = pours.map((p, i) => {
+      const scaled = Math.min(
+        SAFE_LIMITS.pourVolume.max,
+        Math.max(SAFE_LIMITS.pourVolume.min, round1(p.volume * scale)),
+      );
+      return { ...p, volume: track(`pours[${i}].volume`, p.volume, scaled) };
+    });
+
+    let remainingUnits = Math.round(
+      (target - pours.reduce((total, pour) => total + pour.volume, 0)) * 10,
+    );
+    while (remainingUnits !== 0) {
+      const direction = remainingUnits > 0 ? 1 : -1;
+      let index = -1;
+      for (let current = 0; current < pours.length; current += 1) {
+        const candidate = pours[current].volume;
+        const eligible =
+          direction > 0
+            ? candidate < SAFE_LIMITS.pourVolume.max
+            : candidate > SAFE_LIMITS.pourVolume.min;
+        if (eligible && (index < 0 || candidate * direction < pours[index].volume * direction)) {
+          index = current;
+        }
+      }
+      if (index < 0) throw new Error(`clampRecipe: unable to rebalance pours to ${target}ml`);
+      const current = pours[index].volume;
+      const capacityUnits =
+        direction > 0
+          ? Math.round((SAFE_LIMITS.pourVolume.max - current) * 10)
+          : Math.round((current - SAFE_LIMITS.pourVolume.min) * 10);
+      const changeUnits = direction * Math.min(Math.abs(remainingUnits), capacityUnits);
+      const adjusted = round1(current + changeUnits / 10);
+      pours[index] = {
+        ...pours[index],
+        volume: track(`pours[${index}].volume`, current, adjusted),
+      };
+      remainingUnits -= changeUnits;
+    }
+    sum = round1(pours.reduce((s, p) => s + p.volume, 0));
+  };
+
   const { min: minWater, max: maxWater } = SAFE_LIMITS.totalWater;
   if (sum > maxWater || sum < minWater) {
     // 各段之和超出总水区间：等比缩放各段（单段下限 1ml 兜底），
     // 取整差额吸收进最大段，保证 sum 精确等于目标总水且落在 [40,500]
     const target = sum > maxWater ? maxWater : minWater;
-    const scale = target / sum;
-    pours = pours.map((p, i) => {
-      const scaled = Math.max(SAFE_LIMITS.pourVolume.min, round1(p.volume * scale));
-      return { ...p, volume: track(`pours[${i}].volume`, p.volume, scaled) };
-    });
-    sum = round1(pours.reduce((s, p) => s + p.volume, 0));
-    const diff = round1(target - sum);
-    if (Math.abs(diff) > EPS) {
-      let idx = 0;
-      pours.forEach((p, i) => {
-        if (p.volume > pours[idx].volume) idx = i;
-      });
-      const adjusted = Math.min(
-        SAFE_LIMITS.pourVolume.max,
-        Math.max(SAFE_LIMITS.pourVolume.min, round1(pours[idx].volume + diff)),
-      );
-      pours[idx] = {
-        ...pours[idx],
-        volume: track(`pours[${idx}].volume`, pours[idx].volume, adjusted),
-      };
-      sum = round1(pours.reduce((s, p) => s + p.volume, 0));
-    }
+    rebalancePours(target);
   }
   if (Math.abs(grandWater - sum) > EPS) {
     clamped.push(`grandWater: ${grandWater} → ${sum}（对齐各段注水之和）`);
@@ -183,7 +235,7 @@ export function clampRecipe(input: unknown): ClampResult {
     const ratio = (grandWater + bypassVolume) / doseGrams;
     if (ratio > maxRatio) {
       // 稀释过头：把 bypassVolume 压回使最终比例 = maxRatio
-      const target = Math.round(maxRatio * doseGrams - grandWater);
+      const target = Math.floor(maxRatio * doseGrams - grandWater);
       bypassVolume = track("bypassVolume", bypassVolume, target);
       if (bypassVolume < SAFE_LIMITS.bypassVolume!.min) {
         // 即便不加旁路，grandWater/dose 仍超上限：直接关闭旁路
@@ -193,7 +245,7 @@ export function clampRecipe(input: unknown): ClampResult {
       }
     } else if (ratio < minRatio) {
       // 浓缩过度：抬高 bypassVolume 使最终比例 = minRatio
-      const target = Math.round(minRatio * doseGrams - grandWater);
+      const target = Math.ceil(minRatio * doseGrams - grandWater);
       bypassVolume = track("bypassVolume", bypassVolume, target);
       if (bypassVolume > SAFE_LIMITS.bypassVolume!.max) {
         // 旁路加满 100ml 仍达不到下限：关闭旁路
@@ -205,6 +257,51 @@ export function clampRecipe(input: unknown): ClampResult {
   }
 
   // 磨豆模式与配方卡颜色：非法值回退默认（结构上已被 Loose schema 约束）
+  const minPourTotal = pours.length * SAFE_LIMITS.pourVolume.min;
+  const maxPourTotal = pours.length * SAFE_LIMITS.pourVolume.max;
+  const reachableTotal = (enabled: boolean, volume: number): number | null =>
+    nearestReachableTotalInRange(
+      doseGrams,
+      grandWater,
+      Math.max(
+        SAFE_LIMITS.totalWater.min,
+        minPourTotal,
+        enabled ? BYPASS_RATIO_RANGE.min * doseGrams - volume : BYPASS_RATIO_RANGE.min * doseGrams,
+      ),
+      Math.min(
+        SAFE_LIMITS.totalWater.max,
+        maxPourTotal,
+        enabled ? BYPASS_RATIO_RANGE.max * doseGrams - volume : BYPASS_RATIO_RANGE.max * doseGrams,
+      ),
+    );
+
+  let targetTotal = reachableTotal(bypassEnabled, bypassVolume);
+  if (targetTotal === null && bypassEnabled) {
+    bypassEnabled = false;
+    bypassVolume = track("bypassVolume", bypassVolume, SAFE_LIMITS.bypassVolume!.min);
+    clamped.push("bypassEnabled: true -> false (base water cannot satisfy cloud ratio)");
+    targetTotal = reachableTotal(false, bypassVolume);
+  }
+  if (targetTotal === null) {
+    throw new Error("clampRecipe: no cloud-valid total water is reachable within SAFE_LIMITS");
+  }
+  if (Math.abs(grandWater - targetTotal) > EPS) {
+    clamped.push(`grandWater: ${grandWater} -> ${targetTotal} (cloud ratio/reachability)`);
+    rebalancePours(targetTotal);
+    grandWater = sum;
+  }
+
+  const effectiveRatio = round1((grandWater + (bypassEnabled ? bypassVolume : 0)) / doseGrams);
+  if (
+    !isReachableCloudTotal(doseGrams, grandWater) ||
+    effectiveRatio < BYPASS_RATIO_RANGE.min ||
+    effectiveRatio > BYPASS_RATIO_RANGE.max
+  ) {
+    throw new Error(
+      `clampRecipe: cloud invariants failed (ratio=${effectiveRatio}, total=${grandWater})`,
+    );
+  }
+
   const isSetGrinderSize = base.isSetGrinderSize ?? 1;
   const theColor =
     typeof base.theColor === "string" && /^#[0-9a-fA-F]{6}$/.test(base.theColor)

@@ -105,6 +105,17 @@ export const PROBE_TIMEOUT_MS = 5_000;
 /** postJson 遭遇瞬时故障（HTTP 404/5xx）时的重试次数（2026-08-03 实测：同一 URL 首次请求返回 404，随后稳定 200）；任务 #98：仅限幂等调用使用 */
 const TRANSIENT_RETRY_COUNT = 2;
 
+export const XBLOOM_RECIPE_PAGE_SIZE = 100;
+export const XBLOOM_MAX_RECIPE_PAGES = 20;
+
+function boundedPositiveInteger(
+  value: number | undefined,
+  fallback: number,
+  maximum: number,
+): number {
+  return Number.isFinite(value) ? Math.min(maximum, Math.max(1, Math.floor(value!))) : fallback;
+}
+
 // ---------------------------------------------------------------------------
 // 出站代理（本机直连 xbloom 会超时，必须支持代理）
 // ---------------------------------------------------------------------------
@@ -487,6 +498,7 @@ export function shareIdToTableId(shareId: string): string {
 
 /** 生成手机 APP 可导入的分享链接 */
 export function buildShareUrl(tableId: number | string): string {
+  if (isCnRegion()) return "";
   return `${SHARE_BASE}/?id=${encodeURIComponent(tableIdToShareId(tableId))}`;
 }
 
@@ -625,7 +637,7 @@ export async function createRecipe(
         const found = (await listMyRecipes({ session })).find((r) => r.tableId === tableId);
         if (found?.shareUrl) shareUrl = found.shareUrl;
       } catch {
-        /* 取不到官方链接时退回 base64 形态（中国区大概率读不回，但不阻断发布） */
+        /* 官方链接暂未返回时保持空分享链接，不猜测中国区 ID。 */
       }
     }
     // 任务#45：发布后回读云端存储值验证 Σ分段 == dose×ratio（best-effort，不阻断发布）
@@ -692,6 +704,48 @@ export interface CloudRecipeSummary {
   raw: Record<string, unknown>;
 }
 
+export async function paginateRecipePages(
+  fetchPage: (pageNumber: number, countPerPage: number) => Promise<Record<string, unknown>[]>,
+  options: {
+    pageNumber?: number;
+    countPerPage?: number;
+    maxPages?: number;
+  } = {},
+): Promise<Record<string, unknown>[]> {
+  const pageNumber = boundedPositiveInteger(options.pageNumber, 1, Number.MAX_SAFE_INTEGER);
+  const countPerPage = boundedPositiveInteger(
+    options.countPerPage,
+    XBLOOM_RECIPE_PAGE_SIZE,
+    XBLOOM_RECIPE_PAGE_SIZE,
+  );
+  const maxPages = boundedPositiveInteger(
+    options.maxPages,
+    XBLOOM_MAX_RECIPE_PAGES,
+    XBLOOM_MAX_RECIPE_PAGES,
+  );
+  const rows: Record<string, unknown>[] = [];
+  const seenRows = new Set<string>();
+  const seenPages = new Set<string>();
+
+  for (let offset = 0; offset < maxPages; offset += 1) {
+    const page = await fetchPage(pageNumber + offset, countPerPage);
+    const pageSignature = JSON.stringify(
+      page.map((row) => String(row.tableId ?? JSON.stringify(row))),
+    );
+    if (seenPages.has(pageSignature)) break;
+    seenPages.add(pageSignature);
+    for (const row of page) {
+      const key = String(row.tableId ?? JSON.stringify(row));
+      if (!seenRows.has(key)) {
+        seenRows.add(key);
+        rows.push(row);
+      }
+    }
+    if (page.length < countPerPage) break;
+  }
+  return rows;
+}
+
 /**
  * 拉取当前账号创建的配方列表。
  * 照源码字段：authBase + { pageNumber, countPerPage, adaptedModel: 1 }。
@@ -700,23 +754,32 @@ export async function listMyRecipes(
   options: { session?: CloudSession; pageNumber?: number; countPerPage?: number } = {},
 ): Promise<CloudRecipeSummary[]> {
   return withSessionRetry(async (session) => {
-    const payload = {
-      ...authBase(session),
-      pageNumber: options.pageNumber ?? 1,
-      countPerPage: options.countPerPage ?? 100,
-      adaptedModel: 1,
-    };
-    const resp = await postJson("tuMyTeaRecipeCreated.tuhtml", rsaEncrypt(payload), {
-      idempotent: true,
-    });
-    if (resp.result !== "success") {
-      if (isAuthFailureResponse(resp)) throw new AuthExpiredError(pickFailureDetail(resp));
-      const detail = pickFailureDetail(resp);
-      throw new Error(
-        detail ? `拉取配方列表失败：${detail}` : "拉取配方列表失败（云端未返回原因）",
-      );
-    }
-    const list = Array.isArray(resp.list) ? (resp.list as Record<string, unknown>[]) : [];
+    const list = await paginateRecipePages(
+      async (pageNumber, countPerPage) => {
+        const payload = {
+          ...authBase(session),
+          pageNumber,
+          countPerPage,
+          adaptedModel: 1,
+        };
+        const resp = await postJson("tuMyTeaRecipeCreated.tuhtml", rsaEncrypt(payload), {
+          idempotent: true,
+        });
+        if (resp.result !== "success") {
+          if (isAuthFailureResponse(resp)) throw new AuthExpiredError(pickFailureDetail(resp));
+          const detail = pickFailureDetail(resp);
+          throw new Error(
+            detail ? `拉取配方列表失败：${detail}` : "拉取配方列表失败（云端未返回原因）",
+          );
+        }
+        return Array.isArray(resp.list) ? (resp.list as Record<string, unknown>[]) : [];
+      },
+      {
+        pageNumber: options.pageNumber,
+        countPerPage: options.countPerPage,
+        maxPages: options.pageNumber === undefined ? XBLOOM_MAX_RECIPE_PAGES : 1,
+      },
+    );
     return list.map((r) => {
       const tableId = toNum(r.tableId, 0);
       return {
@@ -775,7 +838,7 @@ export async function updateRecipe(
         const found = (await listMyRecipes({ session })).find((r) => r.tableId === tableId);
         if (found?.shareUrl) shareUrl = found.shareUrl;
       } catch {
-        /* 同 createRecipe 的退回策略 */
+        /* 官方链接暂未返回时保持空分享链接。 */
       }
     }
     const verified = await readBackBestEffort(tableId, session);

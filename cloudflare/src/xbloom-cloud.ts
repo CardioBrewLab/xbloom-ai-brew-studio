@@ -1,12 +1,6 @@
-import {
-  BYPASS_RATIO_RANGE,
-  CLOUD_LIMITS,
-  RecipeSchema,
-  cloudToPattern,
-  type LimitRange,
-  type Recipe,
-} from "../../shared/src/recipe-schema.ts";
+import { RecipeSchema, cloudToPattern, type Recipe } from "../../shared/src/recipe-schema.ts";
 import { toCloudPayload } from "../../shared/dist/xbloom-cloud-payload.js";
+import { hostedRecipeCloudErrors } from "./recipe.ts";
 import type { AuthUser } from "./auth.ts";
 import { decryptText, encryptText } from "./crypto.ts";
 import { parseSpkiRsaPublicKey, rsaPkcs1Encrypt } from "./rsa-pkcs1.ts";
@@ -249,29 +243,86 @@ async function withStoredSession<T>(
   }
 }
 
-async function listRemote(stored: StoredXbloomSession): Promise<Record<string, unknown>[]> {
-  const response = await postJson(
-    stored.region,
-    "tuMyTeaRecipeCreated.tuhtml",
-    rsaEncryptXbloom({
-      ...authBase(stored.session),
-      pageNumber: 1,
-      countPerPage: 100,
-      adaptedModel: 1,
-    }),
-    { idempotent: true },
-  );
-  if (response.result !== "success") {
-    if (isAuthFailure(response)) throw new XbloomAuthError(detailOf(response));
-    throw new Error(`读取 xBloom 配方未完成：${detailOf(response)}`);
-  }
-  return Array.isArray(response.list) ? (response.list as Record<string, unknown>[]) : [];
+export const XBLOOM_RECIPE_PAGE_SIZE = 100;
+export const XBLOOM_MAX_RECIPE_PAGES = 20;
+
+function boundedPositiveInteger(
+  value: number | undefined,
+  fallback: number,
+  maximum: number,
+): number {
+  return Number.isFinite(value) ? Math.min(maximum, Math.max(1, Math.floor(value!))) : fallback;
 }
 
-function shareUrl(region: XbloomRegion, row: Record<string, unknown>): string {
+export async function paginateRecipePages(
+  fetchPage: (pageNumber: number, countPerPage: number) => Promise<Record<string, unknown>[]>,
+  options: {
+    pageNumber?: number;
+    countPerPage?: number;
+    maxPages?: number;
+  } = {},
+): Promise<Record<string, unknown>[]> {
+  const pageNumber = boundedPositiveInteger(options.pageNumber, 1, Number.MAX_SAFE_INTEGER);
+  const countPerPage = boundedPositiveInteger(
+    options.countPerPage,
+    XBLOOM_RECIPE_PAGE_SIZE,
+    XBLOOM_RECIPE_PAGE_SIZE,
+  );
+  const maxPages = boundedPositiveInteger(
+    options.maxPages,
+    XBLOOM_MAX_RECIPE_PAGES,
+    XBLOOM_MAX_RECIPE_PAGES,
+  );
+  const rows: Record<string, unknown>[] = [];
+  const seenRows = new Set<string>();
+  const seenPages = new Set<string>();
+
+  for (let offset = 0; offset < maxPages; offset += 1) {
+    const page = await fetchPage(pageNumber + offset, countPerPage);
+    const pageSignature = JSON.stringify(
+      page.map((row) => String(row.tableId ?? JSON.stringify(row))),
+    );
+    if (seenPages.has(pageSignature)) break;
+    seenPages.add(pageSignature);
+
+    for (const row of page) {
+      const key = String(row.tableId ?? JSON.stringify(row));
+      if (!seenRows.has(key)) {
+        seenRows.add(key);
+        rows.push(row);
+      }
+    }
+    if (page.length < countPerPage) break;
+  }
+  return rows;
+}
+
+async function listRemote(stored: StoredXbloomSession): Promise<Record<string, unknown>[]> {
+  return paginateRecipePages(async (pageNumber, countPerPage) => {
+    const response = await postJson(
+      stored.region,
+      "tuMyTeaRecipeCreated.tuhtml",
+      rsaEncryptXbloom({
+        ...authBase(stored.session),
+        pageNumber,
+        countPerPage,
+        adaptedModel: 1,
+      }),
+      { idempotent: true },
+    );
+    if (response.result !== "success") {
+      if (isAuthFailure(response)) throw new XbloomAuthError(detailOf(response));
+      throw new Error(`读取 xBloom 配方未完成：${detailOf(response)}`);
+    }
+    return Array.isArray(response.list) ? (response.list as Record<string, unknown>[]) : [];
+  });
+}
+
+export function shareUrl(region: XbloomRegion, row: Record<string, unknown>): string {
   if (typeof row.shareRecipeLink === "string" && row.shareRecipeLink.startsWith("http")) {
     return row.shareRecipeLink;
   }
+  if (region === "cn") return "";
   const tableId = Number(row.tableId);
   return tableId > 0
     ? `${SHARE_BASE[region]}/?id=${encodeURIComponent(btoa(String(tableId)))}`
@@ -293,35 +344,12 @@ function numberValue(value: unknown, fallback: number): number {
 }
 
 function ensureCloudRecipe(recipe: Recipe): Recipe {
-  const errors: string[] = [];
-  const check = (field: string, value: number, range: LimitRange | undefined): void => {
-    if (range && (value < range.min || value > range.max)) {
-      errors.push(`${field}=${value} 超出云端允许范围 [${range.min}, ${range.max}]`);
-    }
-  };
-
-  check("doseGrams", recipe.doseGrams, CLOUD_LIMITS.doseGrams);
-  check("grinderSize", recipe.grinderSize, CLOUD_LIMITS.grinderSize);
-  check("bypassVolume", recipe.bypassVolume, CLOUD_LIMITS.bypassVolume);
-  check("bypassTemp", recipe.bypassTemp, CLOUD_LIMITS.bypassTemp);
-  recipe.pours.forEach((pour, index) => {
-    check(`pours[${index}].temperature`, pour.temperature, CLOUD_LIMITS.waterTemperature);
-    check(`pours[${index}].flowRate`, pour.flowRate, CLOUD_LIMITS.flowRate);
-    check(`pours[${index}].pausing`, pour.pausing, CLOUD_LIMITS.pausing);
-  });
-
-  const effectiveWater = recipe.grandWater + (recipe.bypassEnabled ? recipe.bypassVolume : 0);
-  const ratio = Math.round((effectiveWater / recipe.doseGrams) * 10) / 10;
-  if (ratio < BYPASS_RATIO_RANGE.min || ratio > BYPASS_RATIO_RANGE.max) {
-    errors.push(
-      `最终粉水比 ${ratio} 超出云端允许范围 [${BYPASS_RATIO_RANGE.min}, ${BYPASS_RATIO_RANGE.max}]`,
-    );
-  }
+  const errors = hostedRecipeCloudErrors(recipe);
   if (errors.length > 0) throw new Error(`配方超出 xBloom 云端范围：${errors.join("；")}`);
   return recipe;
 }
 
-function parseRecipeVo(value: Record<string, unknown>): Recipe {
+export function parseRecipeVo(value: Record<string, unknown>): Recipe {
   const dose = numberValue(value.dose, 15);
   const ratio = numberValue(value.grandWater, 15);
   const rawPours =
@@ -354,7 +382,7 @@ function parseRecipeVo(value: Record<string, unknown>): Recipe {
               ? pour.theName.trim()
               : index === 0
                 ? "Bloom"
-                : `Pour ${index}`,
+                : `Pour ${index + 1}`,
         };
       }),
       bypassEnabled: numberValue(value.isEnableBypassWater, 2) === 1,
@@ -400,6 +428,169 @@ function mappedCloudRecipe(recipe: Recipe, name?: string) {
   return mapped;
 }
 
+export interface CloudReadbackResult {
+  ok: boolean;
+  complete: boolean;
+  message: string;
+}
+
+const CLOUD_READBACK_SCALAR_FIELDS = [
+  "theName",
+  "dose",
+  "grandWater",
+  "grinderSize",
+  "rpm",
+  "cupType",
+  "isEnableBypassWater",
+  "isSetGrinderSize",
+  "theColor",
+  "bypassTemp",
+  "bypassVolume",
+] as const;
+
+const CLOUD_READBACK_NUMBER_FIELDS = new Set([
+  "dose",
+  "grandWater",
+  "grinderSize",
+  "rpm",
+  "cupType",
+  "isEnableBypassWater",
+  "isSetGrinderSize",
+  "bypassTemp",
+  "bypassVolume",
+]);
+
+const CLOUD_READBACK_TEXT_FIELDS = new Set(["theName", "theColor"]);
+
+const CLOUD_READBACK_POUR_FIELDS = [
+  "theName",
+  "volume",
+  "temperature",
+  "flowRate",
+  "pattern",
+  "pausing",
+  "isEnableVibrationBefore",
+  "isEnableVibrationAfter",
+] as const;
+
+function parseCloudPours(value: unknown): Record<string, unknown>[] | null {
+  const parsed =
+    typeof value === "string"
+      ? (() => {
+          try {
+            return JSON.parse(value) as unknown;
+          } catch {
+            return null;
+          }
+        })()
+      : value;
+  if (!Array.isArray(parsed)) return null;
+  if (parsed.some((item) => !item || typeof item !== "object" || Array.isArray(item))) {
+    return null;
+  }
+  return parsed as Record<string, unknown>[];
+}
+
+function cloudPoursFromRow(row: Record<string, unknown>): Record<string, unknown>[] | null {
+  return parseCloudPours(row.pourList ?? row.pourDataJSONStr);
+}
+
+function readbackNumber(value: unknown): number {
+  if (typeof value === "number") return Number.isFinite(value) ? value : NaN;
+  if (typeof value !== "string" || !value.trim()) return NaN;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+export function cloudReadbackCompletenessErrors(row: Record<string, unknown>): string[] {
+  const errors: string[] = [];
+  for (const field of CLOUD_READBACK_SCALAR_FIELDS) {
+    if (!Object.hasOwn(row, field)) errors.push(`缺少字段 ${field}`);
+    if (CLOUD_READBACK_NUMBER_FIELDS.has(field) && !Number.isFinite(readbackNumber(row[field]))) {
+      errors.push(`字段 ${field} 不是可读数字`);
+    }
+    if (
+      CLOUD_READBACK_TEXT_FIELDS.has(field) &&
+      (typeof row[field] !== "string" || !row[field].trim())
+    ) {
+      errors.push(`字段 ${field} 不是可读文本`);
+    }
+  }
+  const pours = cloudPoursFromRow(row);
+  if (!pours) {
+    errors.push("缺少可解析的 pourList");
+    return errors;
+  }
+  if (pours.length === 0) errors.push("pourList 为空");
+  pours.forEach((pour, index) => {
+    for (const field of CLOUD_READBACK_POUR_FIELDS) {
+      if (!Object.hasOwn(pour, field)) errors.push(`pours[${index}] 缺少字段 ${field}`);
+      if (field === "theName" && (typeof pour[field] !== "string" || !pour[field].trim())) {
+        errors.push(`pours[${index}].theName 不是可读文本`);
+      }
+      if (field !== "theName" && !Number.isFinite(readbackNumber(pour[field]))) {
+        errors.push(`pours[${index}].${field} 不是可读数字`);
+      }
+    }
+  });
+  return errors;
+}
+
+function sameNumber(left: unknown, right: unknown): boolean {
+  const a = readbackNumber(left);
+  const b = readbackNumber(right);
+  return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= 1e-9;
+}
+
+export function verifyCloudRecipeReadback(
+  row: Record<string, unknown>,
+  payload: Record<string, unknown>,
+): CloudReadbackResult {
+  const completenessErrors = cloudReadbackCompletenessErrors(row);
+  const expectedPours = parseCloudPours(payload.pourDataJSONStr);
+  if (!expectedPours) {
+    return { ok: false, complete: false, message: "上传 payload 缺少可解析的 pourDataJSONStr" };
+  }
+  if (completenessErrors.length > 0) {
+    return {
+      ok: false,
+      complete: false,
+      message: `云端回读字段不完整：${completenessErrors.join("；")}`,
+    };
+  }
+
+  const mismatches: string[] = [];
+  for (const field of CLOUD_READBACK_SCALAR_FIELDS) {
+    const same = CLOUD_READBACK_NUMBER_FIELDS.has(field)
+      ? sameNumber(row[field], payload[field])
+      : row[field] === payload[field];
+    if (!same)
+      mismatches.push(`${field}: 云端=${String(row[field])}，上传=${String(payload[field])}`);
+  }
+  const actualPours = cloudPoursFromRow(row)!;
+  if (actualPours.length !== expectedPours.length) {
+    mismatches.push(`pourList 段数：云端=${actualPours.length}，上传=${expectedPours.length}`);
+  } else {
+    actualPours.forEach((actual, index) => {
+      const expected = expectedPours[index];
+      for (const field of CLOUD_READBACK_POUR_FIELDS) {
+        const same =
+          field === "theName"
+            ? actual[field] === expected[field]
+            : sameNumber(actual[field], expected[field]);
+        if (!same) {
+          mismatches.push(
+            `pours[${index}].${field}: 云端=${String(actual[field])}，上传=${String(expected[field])}`,
+          );
+        }
+      }
+    });
+  }
+  return mismatches.length > 0
+    ? { ok: false, complete: true, message: `云端回读与上传值不一致：${mismatches.join("；")}` }
+    : { ok: true, complete: true, message: "云端回读与上传 payload 全字段一致" };
+}
+
 async function writeRecipe(
   stored: StoredXbloomSession,
   recipe: Recipe,
@@ -425,19 +616,29 @@ async function writeRecipe(
   if (!resultTableId) throw new Error("xBloom 响应缺少配方 ID");
   const rows = await listRemote(stored).catch(() => []);
   const verifiedRow = rows.find((item) => Number(item.tableId) === resultTableId);
-  const row = verifiedRow ?? {
-    tableId: resultTableId,
-  };
+  const readback = verifiedRow
+    ? verifyCloudRecipeReadback(verifiedRow, mapped.payload)
+    : ({
+        ok: false,
+        complete: false,
+        message: "云端列表回读未找到刚写入的配方",
+      } satisfies CloudReadbackResult);
+  const verificationState = !verifiedRow
+    ? "unverified"
+    : readback.ok
+      ? "verified"
+      : readback.complete
+        ? "mismatch"
+        : "unverified";
   return {
     ok: true,
     tableId: String(resultTableId),
-    shareUrl: shareUrl(stored.region, row),
+    shareUrl: verifiedRow ? shareUrl(stored.region, verifiedRow) : "",
     adjustments: mapped.adjustments,
+    readback,
     verification: {
-      state: verifiedRow ? "verified" : "unverified",
-      message: verifiedRow
-        ? "已写入 xBloom 云端并在账号配方列表中确认"
-        : "已写入 xBloom 云端，列表回读稍后可再确认",
+      state: verificationState,
+      message: readback.message,
     },
   };
 }
@@ -578,13 +779,22 @@ export async function handleXbloomRoute(
     const found = await withStoredSession(env, user, async (stored) =>
       (await listRemote(stored)).find((row) => Number(row.tableId) === tableId),
     );
-    const ok = Boolean(found);
+    const completenessErrors = found
+      ? cloudReadbackCompletenessErrors(found)
+      : [`账号配方列表暂未返回配方 ${tableId}`];
+    const ok = Boolean(found) && completenessErrors.length === 0;
+    const state = !found ? "unverified" : ok ? "verified" : "mismatch";
+    const message = ok
+      ? "账号配方列表已返回完整可执行字段"
+      : found
+        ? `账号配方列表回读字段不完整：${completenessErrors.join("；")}`
+        : completenessErrors[0];
     return json({
       ok: true,
-      readback: { ok, message: ok ? "账号配方列表已确认这条记录" : "账号配方列表暂未返回这条记录" },
+      readback: { ok, message },
       verification: {
-        state: ok ? "verified" : "unverified",
-        message: ok ? "账号配方列表已确认这条记录" : "账号配方列表暂未返回这条记录",
+        state,
+        message,
       },
     });
   }

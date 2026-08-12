@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import { handleXbloomRoute, parseStoredXbloomSession } from "../src/xbloom-cloud.ts";
+import {
+  cloudReadbackCompletenessErrors,
+  handleXbloomRoute,
+  paginateRecipePages,
+  parseRecipeVo,
+  parseStoredXbloomSession,
+  shareUrl,
+  verifyCloudRecipeReadback,
+} from "../src/xbloom-cloud.ts";
 
 const user = { id: "user-1", loginName: "audit", displayName: "Audit" };
 const validRecipe = {
@@ -71,4 +79,109 @@ it("Hosted 发布预演保留合法配方的对齐结果", async () => {
   const payload = (await response.json()) as { ok: boolean; alignedGrandWater: number };
   assert.equal(payload.ok, true);
   assert.equal(payload.alignedGrandWater, 225);
+});
+
+it("Hosted 列表分页有上限并按 tableId 去重", async () => {
+  const requestedPages: number[] = [];
+  const rows = await paginateRecipePages(
+    async (pageNumber, countPerPage) => {
+      requestedPages.push(pageNumber);
+      assert.equal(countPerPage, 2);
+      const pages: Record<string, unknown>[][] = [
+        [{ tableId: 1 }, { tableId: 2 }],
+        [{ tableId: 2 }, { tableId: 3 }],
+        [{ tableId: 4 }],
+      ];
+      return pages[pageNumber - 1] ?? [];
+    },
+    { countPerPage: 2, maxPages: 5 },
+  );
+  assert.deepEqual(
+    rows.map((row) => row.tableId),
+    [1, 2, 3, 4],
+  );
+  assert.deepEqual(requestedPages, [1, 2, 3]);
+});
+
+it("Hosted 中国区缺少官方分享链接时返回空值", () => {
+  assert.equal(shareUrl("cn", { tableId: 42 }), "");
+  assert.equal(
+    shareUrl("cn", { tableId: 42, shareRecipeLink: "https://share.example/official" }),
+    "https://share.example/official",
+  );
+  assert.equal(shareUrl("global", { tableId: 42 }), "https://share-h5.xbloom.com/?id=NDI%3D");
+});
+
+it("Hosted 解析器使用 Bloom / Pour 2 段名规则", () => {
+  const recipe = parseRecipeVo({
+    dose: 15,
+    grandWater: 15.6,
+    grinderSize: 70,
+    rpm: 80,
+    cupType: 2,
+    pourList: [
+      { volume: 100, temperature: 93, flowRate: 3.2, pattern: 1, pausing: 30 },
+      { volume: 134, temperature: 92, flowRate: 3.2, pattern: 3, pausing: 0 },
+    ],
+  });
+  assert.deepEqual(
+    recipe.pours.map((pour) => pour.theName),
+    ["Bloom", "Pour 2"],
+  );
+});
+
+it("Hosted 写入回读逐字段比较 payload，缺字段不标记 verified", () => {
+  const payload = {
+    theName: "Boundary Brew",
+    dose: 15,
+    grandWater: 15.6,
+    grinderSize: 70,
+    rpm: 80,
+    cupType: 2,
+    isEnableBypassWater: 2,
+    isSetGrinderSize: 1,
+    theColor: "#C9D5B8",
+    bypassTemp: 85,
+    bypassVolume: 5,
+    pourDataJSONStr: JSON.stringify([
+      {
+        theName: "Bloom",
+        volume: 100,
+        temperature: 93,
+        flowRate: 3.2,
+        pattern: 1,
+        pausing: 30,
+        isEnableVibrationBefore: 2,
+        isEnableVibrationAfter: 2,
+      },
+      {
+        theName: "Pour 2",
+        volume: 134,
+        temperature: 92,
+        flowRate: 3.2,
+        pattern: 3,
+        pausing: 0,
+        isEnableVibrationBefore: 2,
+        isEnableVibrationAfter: 2,
+      },
+    ]),
+  };
+  const row = { ...payload, pourList: payload.pourDataJSONStr, tableId: 42 };
+  assert.deepEqual(cloudReadbackCompletenessErrors(row), []);
+  assert.deepEqual(verifyCloudRecipeReadback(row, payload), {
+    ok: true,
+    complete: true,
+    message: "云端回读与上传 payload 全字段一致",
+  });
+  const mismatch = {
+    ...row,
+    pourList: JSON.stringify([
+      ...JSON.parse(payload.pourDataJSONStr),
+      // Keep the row length stable while changing an executable field.
+    ]).replace('"volume":100', '"volume":101'),
+  };
+  assert.equal(verifyCloudRecipeReadback(mismatch, payload).complete, true);
+  assert.equal(verifyCloudRecipeReadback(mismatch, payload).ok, false);
+  const incomplete = { ...row, rpm: undefined };
+  assert.equal(verifyCloudRecipeReadback(incomplete, payload).complete, false);
 });

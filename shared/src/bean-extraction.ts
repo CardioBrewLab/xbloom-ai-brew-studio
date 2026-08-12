@@ -23,20 +23,26 @@ export function normalizeRoastLevel(raw: unknown): string | null {
   return null;
 }
 
+const nullableTextField = () =>
+  z
+    .string()
+    .nullish()
+    .transform((value) => value ?? null);
+
 export const ParsedBeanSchema = z.object({
-  name: z.string().nullable(),
-  roaster: z.string().nullable(),
-  origin: z.string().nullable(),
-  estate: z.string().nullable(),
-  process: z.string().nullable(),
-  varietal: z.string().nullable(),
-  roastLevel: z.string().nullable(),
+  name: nullableTextField(),
+  roaster: nullableTextField(),
+  origin: nullableTextField(),
+  estate: nullableTextField(),
+  process: nullableTextField(),
+  varietal: nullableTextField(),
+  roastLevel: nullableTextField(),
   tastingNotes: z
     .array(z.string())
-    .nullable()
+    .nullish()
     .transform((value) => value ?? []),
-  altitude: z.string().nullable(),
-  notes: z.string().nullable(),
+  altitude: nullableTextField(),
+  notes: nullableTextField(),
 });
 
 export type ParsedBeanInfo = z.infer<typeof ParsedBeanSchema>;

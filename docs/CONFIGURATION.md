@@ -68,6 +68,14 @@ Windows launcher 使用以下默认值：
 
 启动器前可以用 `PORT` 修改本地 API 端口，用 `WEB_PORT` 修改 UI 端口。除非已经完成局域网暴露设计，请让本地服务保持回环监听。
 
+watchdog 会把同一个 API 端口写入 `VITE_API_PROXY_TARGET`，因此 UI 会跟随 `PORT` 转发 `/api` 请求。该值必须是绝对的 HTTP/HTTPS 地址，且不带用户名、密码、查询参数或片段；非法值会在 Vite 启动前报错。
+
+`SEARXNG_URL` 和 `XHS_MCP_URL` 可以指向远程或其他本机端口。watchdog 只有在它们仍是默认回环地址（8899/18060）时才执行本地 Docker/XHS 自愈；自定义地址由用户自己的服务管理。
+
+### 本地状态权限
+
+安装器在 NTFS/ReFS 上会为 `.env`、`data`、XHS runtime 和已存在的 Edge proxy secret 收紧 ACL，仅保留当前用户、LocalSystem 与本机 Administrators。exFAT/FAT 没有可靠的按用户 ACL，安装器会显示醒目的安全警告；请将整个项目目录放在当前用户私有位置。
+
 ### `.env` 参考
 
 如果本地没有 `.env`，安装器会从 `.env.example` 创建空白文件。以下变量属于本地用户配置：

@@ -24,3 +24,15 @@ export function savedRecipeState(result: RecipeSaveResult, fallback: Recipe): Sa
     ...(result.warning ? { warning: result.warning } : {}),
   };
 }
+
+export function savedRecipePairState(
+  originalResult: RecipeSaveResult,
+  originalFallback: Recipe,
+  improvedResult: RecipeSaveResult,
+  improvedFallback: Recipe,
+): { original: SavedRecipeState; improved: SavedRecipeState } {
+  return {
+    original: savedRecipeState(originalResult, originalFallback),
+    improved: savedRecipeState(improvedResult, improvedFallback),
+  };
+}

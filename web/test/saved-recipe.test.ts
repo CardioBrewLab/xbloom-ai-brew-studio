@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { savedRecipeState } from "../src/lib/saved-recipe.js";
+import { savedRecipePairState, savedRecipeState } from "../src/lib/saved-recipe.js";
 import type { Recipe } from "../src/lib/recipe-schema.js";
 
 const fallback: Recipe = {
@@ -55,5 +55,29 @@ describe("server-normalized saved recipe", () => {
     const result = savedRecipeState({ ok: true, id: "local-2" }, fallback);
     assert.equal(result.recipe, fallback);
     assert.equal(result.normalized, false);
+  });
+
+  it("keeps both variants aligned with their independent server save responses", () => {
+    const improvedFallback = { ...fallback, name: "改进版", grinderSize: 55 };
+    const originalNormalized = {
+      ...fallback,
+      grandWater: 220,
+      pours: [{ ...fallback.pours[0], volume: 220 }],
+    };
+    const improvedNormalized = {
+      ...improvedFallback,
+      grandWater: 230,
+      pours: [{ ...fallback.pours[0], volume: 230 }],
+    };
+    const pair = savedRecipePairState(
+      { ok: true, id: "original", recipe: originalNormalized, clamped: ["原版修正"] },
+      fallback,
+      { ok: true, id: "improved", recipe: improvedNormalized, clamped: ["改进版修正"] },
+      improvedFallback,
+    );
+    assert.deepEqual(pair.original.recipe, originalNormalized);
+    assert.deepEqual(pair.improved.recipe, improvedNormalized);
+    assert.deepEqual(pair.original.clamped, ["原版修正"]);
+    assert.deepEqual(pair.improved.clamped, ["改进版修正"]);
   });
 });

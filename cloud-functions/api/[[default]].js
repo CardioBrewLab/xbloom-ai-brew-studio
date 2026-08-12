@@ -109,6 +109,7 @@ export default async function onRequest(context) {
     method: request.method,
     headers,
     redirect: "manual",
+    signal: request.signal,
     ...(hasBody ? { body, duplex: "half" } : {}),
   };
   let upstream;

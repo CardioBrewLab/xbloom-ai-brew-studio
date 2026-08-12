@@ -8,6 +8,11 @@ import {
   requestBody,
   type Env,
 } from "../src/index.ts";
+import {
+  HOSTED_BEAN_PARSE_TOTAL_BUDGET_MS,
+  HOSTED_MAX_TOTAL_BUDGET_MS,
+  HOSTED_SINGLE_TOTAL_BUDGET_MS,
+} from "../src/hosted-budgets.ts";
 import { encryptText } from "../src/crypto.ts";
 import {
   acquireQrLeaseWithBudget,
@@ -17,6 +22,12 @@ import {
 
 const APP_SESSION_SECRET = "test-session-secret-with-at-least-32-characters";
 const DATA_KEY = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+test("hosted generation budgets finish inside the EdgeOne 120s relay ceiling", () => {
+  assert.ok(HOSTED_MAX_TOTAL_BUDGET_MS <= 112_000);
+  assert.ok(HOSTED_SINGLE_TOTAL_BUDGET_MS <= HOSTED_MAX_TOTAL_BUDGET_MS);
+  assert.ok(HOSTED_BEAN_PARSE_TOTAL_BUDGET_MS <= 112_000);
+});
 
 function usageDb(forcedCount = 0): D1Database {
   const counts = new Map<string, number>();
@@ -252,10 +263,15 @@ test("aborting XHS research closes the Browser Run and releases its research lea
     DATA_KEY,
   );
   let releaseLeaseCount = 0;
+  let releaseBudgetCount = 0;
   let closeCount = 0;
   let resolveLaunch!: () => void;
+  let finishLaunch!: () => void;
   const launchStarted = new Promise<void>((resolve) => {
     resolveLaunch = resolve;
+  });
+  const launchGate = new Promise<void>((resolve) => {
+    finishLaunch = resolve;
   });
   const db = {
     prepare(sql: string) {
@@ -285,6 +301,7 @@ test("aborting XHS research closes the Browser Run and releases its research lea
         },
         async run() {
           if (sql.startsWith("UPDATE xhs_research_cache")) releaseLeaseCount += 1;
+          if (sql.startsWith("UPDATE xhs_browser_budget")) releaseBudgetCount += 1;
           return { meta: { changes: 1 } };
         },
         async batch() {
@@ -325,6 +342,7 @@ test("aborting XHS research closes the Browser Run and releases its research lea
     });
     puppeteer.launch = async () => {
       resolveLaunch();
+      await launchGate;
       return browser as never;
     };
     const controller = new AbortController();
@@ -345,8 +363,13 @@ test("aborting XHS research closes the Browser Run and releases its research lea
     ]);
     controller.abort(new Error("test abort"));
     await assert.rejects(pending, /test abort/);
+    finishLaunch();
+    for (let attempt = 0; attempt < 20 && closeCount === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
     assert.equal(closeCount, 1);
     assert.equal(releaseLeaseCount, 1);
+    assert.equal(releaseBudgetCount, 0);
   } finally {
     puppeteer.limits = originalLimits;
     puppeteer.launch = originalLaunch;

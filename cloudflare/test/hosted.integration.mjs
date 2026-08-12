@@ -351,19 +351,34 @@ try {
   });
   assert.equal(invalidRecipePatch.response.status, 400);
 
+  const normalizedRecipeRequestId = crypto.randomUUID();
+  const normalizedRecipeBody = {
+    clientRequestId: normalizedRecipeRequestId,
+    recipe: {
+      ...validRecipe,
+      name: "Normalized Brew",
+      pours: validRecipe.pours.map((pour) => ({ ...pour, temperature: 120 })),
+    },
+  };
   const normalizedRecipe = await request("/api/recipes", {
     jar: user1,
     method: "POST",
-    body: {
-      recipe: {
-        ...validRecipe,
-        name: "Normalized Brew",
-        pours: validRecipe.pours.map((pour) => ({ ...pour, temperature: 120 })),
-      },
-    },
+    body: normalizedRecipeBody,
   });
   assert.equal(normalizedRecipe.response.status, 200);
   assert.match(normalizedRecipe.payload.warning ?? "", /安全边界/);
+  assert.equal(normalizedRecipe.payload.recipe.pours[0].temperature, 95);
+  assert.ok(Array.isArray(normalizedRecipe.payload.clamped));
+  assert.ok(normalizedRecipe.payload.clamped.length > 0);
+  const normalizedRecipeRetry = await request("/api/recipes", {
+    jar: user1,
+    method: "POST",
+    body: normalizedRecipeBody,
+  });
+  assert.equal(normalizedRecipeRetry.payload.id, normalizedRecipeRequestId);
+  assert.equal(normalizedRecipeRetry.payload.recipe.pours[0].temperature, 95);
+  assert.ok(normalizedRecipeRetry.payload.clamped.length > 0);
+  assert.match(normalizedRecipeRetry.payload.warning ?? "", /安全边界/);
   const normalizedRows = await request("/api/recipes", { jar: user1, requestOrigin: null });
   assert.equal(
     normalizedRows.payload.recipes.find((entry) => entry.id === normalizedRecipe.payload.id).recipe
@@ -535,6 +550,28 @@ try {
   });
   assert.equal(idempotentRecipe1.payload.id, recipeRequestId);
   assert.equal(idempotentRecipe2.payload.id, recipeRequestId);
+
+  // Random missing IDs must not spend the owner's write allowance. Run more than
+  // the default hourly owner limit, then prove a real write still succeeds.
+  for (let offset = 0; offset < 250; offset += 25) {
+    const probes = await Promise.all(
+      Array.from({ length: 25 }, () =>
+        request(`/api/recipes/${crypto.randomUUID()}`, {
+          jar: user1,
+          method: "PATCH",
+          body: { beanId: "" },
+        }),
+      ),
+    );
+    for (const probe of probes) assert.equal(probe.response.status, 404);
+  }
+  const postProbeWrite = await request(`/api/recipes/${recipeRequestId}`, {
+    jar: user1,
+    method: "PATCH",
+    body: { beanId: bean1.payload.id },
+  });
+  assert.equal(postProbeWrite.response.status, 200);
+
   await request(`/api/recipes/${recipeRequestId}`, {
     jar: user1,
     method: "PATCH",

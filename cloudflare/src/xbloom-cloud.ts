@@ -45,6 +45,30 @@ const RSA_PUBLIC_KEY_B64 =
   "J1VBbCv90yBSOhVxO+QIDAQAB";
 const RSA_KEY = parseSpkiRsaPublicKey(RSA_PUBLIC_KEY_B64);
 const encoder = new TextEncoder();
+const REQUEST_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+interface XbloomWriteOperationRow {
+  request_hash: string;
+  status: "pending" | "complete";
+  before_ids_json: string;
+  response_json: string;
+  lease_until: number;
+}
+
+export function normalizeXbloomWriteRequestId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return REQUEST_ID_PATTERN.test(normalized) ? normalized : null;
+}
+
+async function writeRequestFingerprint(recipe: Recipe, name: string | undefined): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    encoder.encode(JSON.stringify({ recipe, name: name ?? "" })),
+  );
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 function encryptionSecret(env: XbloomEnv): string {
   if (!env.APP_DATA_ENCRYPTION_KEY?.trim()) throw new Error("站点尚未配置数据加密密钥");
@@ -591,31 +615,14 @@ export function verifyCloudRecipeReadback(
     : { ok: true, complete: true, message: "云端回读与上传 payload 全字段一致" };
 }
 
-async function writeRecipe(
+async function completedWriteResult(
   stored: StoredXbloomSession,
-  recipe: Recipe,
-  name: string | undefined,
-  tableId?: number,
+  mapped: ReturnType<typeof mappedCloudRecipe>,
+  resultTableId: number,
+  rows?: Record<string, unknown>[],
 ) {
-  const mapped = mappedCloudRecipe(recipe, name);
-  const endpoint = tableId ? "tuRecipeUpdate.tuhtml" : "tuRecipeAdd.tuhtml";
-  const response = await postJson(
-    stored.region,
-    endpoint,
-    rsaEncryptXbloom({
-      ...authBase(stored.session),
-      ...(tableId ? { tableId } : {}),
-      ...mapped.payload,
-    }),
-  );
-  if (response.result !== "success") {
-    if (isAuthFailure(response)) throw new XbloomAuthError(detailOf(response));
-    throw new Error(`${tableId ? "更新" : "上传"}配方未完成：${detailOf(response)}`);
-  }
-  const resultTableId = tableId ?? numberValue(response.tableId, 0);
-  if (!resultTableId) throw new Error("xBloom 响应缺少配方 ID");
-  const rows = await listRemote(stored).catch(() => []);
-  const verifiedRow = rows.find((item) => Number(item.tableId) === resultTableId);
+  const cloudRows = rows ?? (await listRemote(stored).catch(() => []));
+  const verifiedRow = cloudRows.find((item) => Number(item.tableId) === resultTableId);
   const readback = verifiedRow
     ? verifyCloudRecipeReadback(verifiedRow, mapped.payload)
     : ({
@@ -641,6 +648,204 @@ async function writeRecipe(
       message: readback.message,
     },
   };
+}
+
+async function recoverCreatedRecipe(
+  stored: StoredXbloomSession,
+  mapped: ReturnType<typeof mappedCloudRecipe>,
+  beforeIds: Set<number>,
+) {
+  // A failed list is an unknown outcome, not proof that the create was absent.
+  // Keeping that distinction prevents a retry from creating a duplicate row.
+  const rows = await listRemote(stored);
+  const matches = rows.filter((row) => {
+    const candidateId = numberValue(row.tableId, 0);
+    return (
+      candidateId > 0 &&
+      !beforeIds.has(candidateId) &&
+      verifyCloudRecipeReadback(row, mapped.payload).ok
+    );
+  });
+  const recoveredId = newestCloudRecipeId(matches);
+  if (recoveredId === null) return null;
+  return completedWriteResult(stored, mapped, recoveredId, rows);
+}
+
+export function newestCloudRecipeId(rows: ReadonlyArray<Record<string, unknown>>): number | null {
+  const ids = rows.map((row) => numberValue(row.tableId, 0)).filter((id) => id > 0);
+  return ids.length > 0 ? Math.max(...ids) : null;
+}
+
+async function writeRecipe(
+  stored: StoredXbloomSession,
+  recipe: Recipe,
+  name: string | undefined,
+  tableId?: number,
+  knownBeforeIds?: Set<number>,
+) {
+  const mapped = mappedCloudRecipe(recipe, name);
+  const endpoint = tableId ? "tuRecipeUpdate.tuhtml" : "tuRecipeAdd.tuhtml";
+  const beforeIds =
+    knownBeforeIds ??
+    (tableId
+      ? new Set<number>()
+      : new Set((await listRemote(stored)).map((row) => numberValue(row.tableId, 0))));
+  let response: Record<string, unknown>;
+  try {
+    response = await postJson(
+      stored.region,
+      endpoint,
+      rsaEncryptXbloom({
+        ...authBase(stored.session),
+        ...(tableId ? { tableId } : {}),
+        ...mapped.payload,
+      }),
+    );
+  } catch (error) {
+    if (!tableId) {
+      const recovered = await recoverCreatedRecipe(stored, mapped, beforeIds);
+      if (recovered) return recovered;
+    }
+    throw error;
+  }
+  if (response.result !== "success") {
+    if (isAuthFailure(response)) throw new XbloomAuthError(detailOf(response));
+    if (!tableId) {
+      const recovered = await recoverCreatedRecipe(stored, mapped, beforeIds);
+      if (recovered) return recovered;
+    }
+    throw new Error(`${tableId ? "更新" : "上传"}配方未完成：${detailOf(response)}`);
+  }
+  const resultTableId = tableId ?? numberValue(response.tableId, 0);
+  if (!resultTableId) {
+    const recovered = tableId ? null : await recoverCreatedRecipe(stored, mapped, beforeIds);
+    if (recovered) return recovered;
+    throw new Error("xBloom 响应缺少配方 ID");
+  }
+  return completedWriteResult(stored, mapped, resultTableId);
+}
+
+type XbloomWriteResult = Awaited<ReturnType<typeof writeRecipe>>;
+
+/** Scope create idempotency to the concrete regional xBloom App account. */
+export function xbloomWriteAccountScope(region: XbloomRegion, memberId: string | number): string {
+  return `${region}:${memberId}`;
+}
+
+async function idempotentCreateRecipe(
+  env: XbloomEnv,
+  user: AuthUser,
+  stored: StoredXbloomSession,
+  recipe: Recipe,
+  name: string | undefined,
+  requestId: string,
+): Promise<{ result?: XbloomWriteResult; conflict?: string }> {
+  const requestHash = await writeRequestFingerprint(recipe, name);
+  const memberId = xbloomWriteAccountScope(stored.region, stored.session.memberId);
+  const readOperation = () =>
+    env.DB.prepare(
+      `SELECT request_hash,status,before_ids_json,response_json,lease_until
+       FROM xbloom_write_operations WHERE user_id=? AND member_id=? AND request_id=?`,
+    )
+      .bind(user.id, memberId, requestId)
+      .first<XbloomWriteOperationRow>();
+  let existing = await readOperation();
+  if (existing?.request_hash !== undefined && existing.request_hash !== requestHash) {
+    return { conflict: "同一发布请求号对应了不同配方，请重新打开发布预览" };
+  }
+  if (existing?.status === "complete") {
+    return { result: JSON.parse(existing.response_json) as XbloomWriteResult };
+  }
+  if (existing?.status === "pending") {
+    if (existing.lease_until > Date.now()) {
+      return { conflict: "该配方正在写入 xBloom 云端，请稍后点击重试" };
+    }
+    const mapped = mappedCloudRecipe(recipe, name);
+    const beforeIds = new Set<number>(JSON.parse(existing.before_ids_json) as number[]);
+    const recovered = await recoverCreatedRecipe(stored, mapped, beforeIds);
+    if (recovered) {
+      await env.DB.prepare(
+        `UPDATE xbloom_write_operations SET status='complete',response_json=?,updated_at=?
+         WHERE user_id=? AND member_id=? AND request_id=? AND request_hash=?`,
+      )
+        .bind(
+          JSON.stringify(recovered),
+          new Date().toISOString(),
+          user.id,
+          memberId,
+          requestId,
+          requestHash,
+        )
+        .run();
+      return { result: recovered };
+    }
+    await env.DB.prepare(
+      `DELETE FROM xbloom_write_operations
+       WHERE user_id=? AND member_id=? AND request_id=? AND request_hash=? AND status='pending' AND lease_until<=?`,
+    )
+      .bind(user.id, memberId, requestId, requestHash, Date.now())
+      .run();
+    existing = await readOperation();
+    if (existing) return { conflict: "该配方正在写入 xBloom 云端，请稍后点击重试" };
+  }
+
+  const now = new Date().toISOString();
+  const beforeIds = new Set((await listRemote(stored)).map((row) => numberValue(row.tableId, 0)));
+  const claimed = await env.DB.prepare(
+    `INSERT OR IGNORE INTO xbloom_write_operations
+      (user_id,member_id,request_id,request_hash,status,before_ids_json,response_json,lease_until,updated_at)
+     VALUES(?,?,?,?,'pending',?,'',?,?)`,
+  )
+    .bind(
+      user.id,
+      memberId,
+      requestId,
+      requestHash,
+      JSON.stringify([...beforeIds]),
+      Date.now() + 120_000,
+      now,
+    )
+    .run();
+  if ((claimed.meta.changes ?? 0) === 0) {
+    existing = await readOperation();
+    if (existing?.request_hash !== requestHash) {
+      return { conflict: "同一发布请求号对应了不同配方，请重新打开发布预览" };
+    }
+    if (existing?.status === "complete") {
+      return { result: JSON.parse(existing.response_json) as XbloomWriteResult };
+    }
+    return { conflict: "该配方正在写入 xBloom 云端，请稍后点击重试" };
+  }
+
+  try {
+    const result = await writeRecipe(stored, recipe, name, undefined, beforeIds);
+    await env.DB.prepare(
+      `UPDATE xbloom_write_operations
+       SET status='complete',response_json=?,updated_at=?
+       WHERE user_id=? AND member_id=? AND request_id=? AND request_hash=?`,
+    )
+      .bind(
+        JSON.stringify(result),
+        new Date().toISOString(),
+        user.id,
+        memberId,
+        requestId,
+        requestHash,
+      )
+      .run();
+    return { result };
+  } catch (error) {
+    // Keep the before-ID snapshot after every uncertain failure. A retry first proves
+    // whether the remote create exists; only a successful list with no match may clear it.
+    await env.DB.prepare(
+      `UPDATE xbloom_write_operations SET lease_until=0,updated_at=?
+       WHERE user_id=? AND member_id=? AND request_id=? AND request_hash=? AND status='pending'`,
+    )
+      .bind(new Date().toISOString(), user.id, memberId, requestId, requestHash)
+      .run()
+      .catch(() => {});
+    throw error;
+  }
 }
 
 export async function handleXbloomRoute(
@@ -698,6 +903,7 @@ export async function handleXbloomRoute(
       passwordStored: false,
       ...(stored ? { email: maskEmail(stored.email) } : {}),
       ...(stored ? { region: stored.region } : {}),
+      ...(stored ? { memberId: String(stored.session.memberId) } : {}),
       message: stored ? `xBloom 会话已连接（${maskEmail(stored.email)}）` : "xBloom 云端待登录",
     });
   }
@@ -711,7 +917,12 @@ export async function handleXbloomRoute(
     }
     const session = await loginRemote(region, email, password);
     await saveStored(env, user, { region, email, session });
-    return json({ ok: true, memberId: String(session.memberId), email: maskEmail(email) });
+    return json({
+      ok: true,
+      memberId: String(session.memberId),
+      email: maskEmail(email),
+      region,
+    });
   }
   if (request.method === "POST" && path === "/api/cloud/logout") {
     await env.DB.prepare("DELETE FROM user_external_sessions WHERE user_id=? AND service='xbloom'")
@@ -739,7 +950,20 @@ export async function handleXbloomRoute(
     const body = await bodyObject(request);
     const recipe = validatedRecipe(body);
     const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : undefined;
-    return json(await withStoredSession(env, user, (stored) => writeRecipe(stored, recipe, name)));
+    const requestId = normalizeXbloomWriteRequestId(body.clientRequestId);
+    if (body.clientRequestId !== undefined && !requestId) {
+      return json({ ok: false, message: "clientRequestId 格式有误" }, 400);
+    }
+    if (!requestId) {
+      return json(
+        await withStoredSession(env, user, (stored) => writeRecipe(stored, recipe, name)),
+      );
+    }
+    const outcome = await withStoredSession(env, user, (stored) =>
+      idempotentCreateRecipe(env, user, stored, recipe, name, requestId),
+    );
+    if (outcome.conflict) return json({ ok: false, message: outcome.conflict }, 409);
+    return json(outcome.result!);
   }
   if (request.method === "GET" && path === "/api/cloud/recipes") {
     const result = await withStoredSession(env, user, async (stored) => ({

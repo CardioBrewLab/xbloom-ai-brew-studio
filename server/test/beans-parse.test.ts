@@ -10,12 +10,10 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import http from "node:http";
-import { once } from "node:events";
-import type { AddressInfo } from "node:net";
 import express from "express";
 import { beansRouter, normalizeRoastLevel, sanitizeParsedBean } from "../src/routes/beans.js";
 import { config } from "../src/config.js";
-import { shutdownHttpServer } from "./helpers/http-server.js";
+import { fetchSafePort, shutdownHttpServer } from "./helpers/http-server.js";
 
 // ---------------------------------------------------------------------------
 // mock LLM：按序消费响应队列；stream:false 回一次性 JSON
@@ -63,8 +61,7 @@ before(async () => {
   app.use(express.json());
   app.use(beansRouter);
   appServer = app.listen(0, "127.0.0.1");
-  await once(appServer, "listening");
-  appPort = (appServer.address() as AddressInfo).port;
+  appPort = await fetchSafePort(appServer);
 });
 
 after(async () => {
@@ -80,8 +77,7 @@ async function useMockLlm(queue: QueuedResponse[]): Promise<Array<Record<string,
   await shutdownHttpServer(mock?.server);
   mock = startMockLlm(queue);
   mock.server.listen(0, "127.0.0.1");
-  await once(mock.server, "listening");
-  const port = (mock.server.address() as AddressInfo).port;
+  const port = await fetchSafePort(mock.server);
   config.llm.baseUrl = `http://127.0.0.1:${port}/v1`;
   config.llm.apiKey = "test-key";
   config.llm.model = "gpt-test"; // gpt 系：不下发 temperature（采样层治理口径）

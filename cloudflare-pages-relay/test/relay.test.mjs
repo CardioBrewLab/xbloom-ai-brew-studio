@@ -109,4 +109,21 @@ describe("Cloudflare Pages API Relay", () => {
     assert.equal(response.status, 413);
     assert.ok(bytesRead <= 393216, `read ${bytesRead} bytes`);
   });
+
+  test("client cancellation propagates to the upstream request", async () => {
+    let captured;
+    globalThis.fetch = async (request) => {
+      captured = request;
+      return new Response(null, { status: 204 });
+    };
+    const controller = new AbortController();
+    const response = await relayRequest(
+      new Request("https://relay.example/api/status", { signal: controller.signal }),
+      { UPSTREAM_ORIGIN: "https://worker.example/" },
+    );
+    assert.equal(response.status, 204);
+    assert.equal(captured.signal.aborted, false);
+    controller.abort(new Error("client left"));
+    assert.equal(captured.signal.aborted, true);
+  });
 });

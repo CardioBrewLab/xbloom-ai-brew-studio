@@ -24,6 +24,7 @@ import {
   backfillResulting,
   buildFeedbackEntry,
   deriveVersion,
+  existingRecipeSaveResponse,
   FeedbackSchema,
   isValidPairPatch,
   MAX_FEEDBACKS_PER_RECIPE,
@@ -80,6 +81,44 @@ function tmpFile(name: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xbloom-test-"));
   return path.join(dir, name);
 }
+
+it("配方保存幂等重试仍返回安全修正与已保存配方", () => {
+  const stored = {
+    id: "123e4567-e89b-42d3-a456-426614174000",
+    createdAt: new Date().toISOString(),
+    recipe: {
+      name: "Saved Brew",
+      cupType: "xdripper",
+      doseGrams: 15,
+      grinderSize: 70,
+      rpm: 80,
+      grandWater: 225,
+      pours: [
+        {
+          volume: 225,
+          temperature: 95,
+          flowRate: 3.2,
+          pattern: "center",
+          pausing: 0,
+          vibBefore: false,
+          vibAfter: false,
+        },
+      ],
+      bypassEnabled: false,
+      bypassVolume: 0,
+      bypassTemp: 85,
+      isSetGrinderSize: 1,
+      theColor: "#C9D5B8",
+    },
+  } satisfies StoredRecipe;
+  const result = existingRecipeSaveResponse(stored, {
+    ...stored.recipe,
+    pours: stored.recipe.pours.map((pour) => ({ ...pour, temperature: 120 })),
+  });
+  assert.equal(result.id, stored.id);
+  assert.equal(result.recipe.pours[0].temperature, 95);
+  assert.ok(result.clamped.some((entry) => entry.includes("temperature")));
+});
 
 describe("豆库数据层 CRUD", () => {
   it("文件不存在时 loadBeans 返回空库", () => {

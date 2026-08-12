@@ -5,7 +5,7 @@
  * - 已登录 → GET /api/cloud/recipes 列出云端账号配方，支持删除与导入本地编辑
  * - 品牌澄清：明确标注所连接的是 xBloom 官方云服务域名
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type CloudRecipeEntry, type CloudRegion, type CloudStatus } from "../lib/api.js";
 import type { Recipe } from "../lib/recipe-schema.js";
 import { cloudDetailReference } from "../lib/cloud-share.js";
@@ -59,25 +59,36 @@ export default function CloudPage({
   const [listError, setListError] = useState("");
   const [busyId, setBusyId] = useState("");
   const [message, setMessage] = useState("");
+  const listRequestRef = useRef(0);
   const loggedIn = cloud?.loggedIn ?? false;
+  const cloudAccountIdentity = cloud?.memberId ?? cloud?.email ?? "";
 
   const { apiHost, shareHost } = cloudDomains(cloudRegion);
 
   const refresh = useCallback(async () => {
+    const requestId = ++listRequestRef.current;
     setEntries(null);
     setListError("");
     try {
       const res = await api.cloudRecipes(cloudRegion);
+      if (requestId !== listRequestRef.current) return;
       setEntries(res.recipes ?? []);
     } catch (e) {
+      if (requestId !== listRequestRef.current) return;
       setEntries(null);
       setListError((e as Error).message);
     }
   }, [cloudRegion]);
 
   useEffect(() => {
-    if (loggedIn) void refresh();
-  }, [loggedIn, refresh]);
+    if (loggedIn) {
+      void refresh();
+    } else {
+      listRequestRef.current += 1;
+      setEntries(null);
+      setListError("");
+    }
+  }, [cloudAccountIdentity, loggedIn, refresh]);
 
   const login = async () => {
     if (!email.trim() || !password) return;

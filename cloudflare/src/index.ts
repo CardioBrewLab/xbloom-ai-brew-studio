@@ -31,6 +31,11 @@ import { generationQuotaSubjects, sameOriginMutation } from "./session.ts";
 import { handleXbloomRoute } from "./xbloom-cloud.ts";
 import { handleXhsBrowserRoute, researchXhsWithBrowser } from "./xhs-browser.ts";
 import { createSseResponse, type SseSender } from "./sse.ts";
+import {
+  HOSTED_BEAN_PARSE_TOTAL_BUDGET_MS,
+  HOSTED_MAX_TOTAL_BUDGET_MS,
+  HOSTED_SINGLE_TOTAL_BUDGET_MS,
+} from "./hosted-budgets.ts";
 
 export interface Env extends ModelSettingsEnv {
   DB: D1Database;
@@ -259,12 +264,14 @@ class FeedbackLimitError extends Error {
 
 function normalizedStoredRecipe(value: unknown): {
   recipe: HostedRecipe;
+  clamped: string[];
   warning?: string;
 } {
   try {
     const normalized = normalizeRecipeWithReport(value);
     return {
       recipe: normalized.recipe,
+      clamped: normalized.clamps,
       ...(normalized.clamps.length > 0
         ? { warning: `已按安全边界调整：${normalized.clamps.join("；")}` }
         : {}),
@@ -452,8 +459,6 @@ const HOSTED_CANDIDATE_DIRECTIONS = [
 const HOSTED_MODEL_REQUEST_TIMEOUT_MS = 60_000;
 const HOSTED_MAX_CANDIDATE_BUDGET_MS = 75_000;
 const HOSTED_SINGLE_CANDIDATE_BUDGET_MS = 90_000;
-const HOSTED_MAX_TOTAL_BUDGET_MS = 150_000;
-const HOSTED_SINGLE_TOTAL_BUDGET_MS = 105_000;
 const HOSTED_MAX_SCORE_TARGET = 90;
 const HOSTED_DIVERSITY_RETRIES = 1;
 
@@ -1289,7 +1294,13 @@ export async function parseHostedBeanRequest(
   if (!connection) return json({ ok: false, message: "请先登录并完成模型连接配置" }, 409);
   await enforceGenerationQuota(env, request, owner);
   try {
-    const extraction = await parseHostedBeanInfo(env, user, text, request.signal);
+    // EdgeOne's relay has a 120 s function ceiling. The parser may try several
+    // provider models, so one shared deadline must cover the complete fallback chain.
+    const beanParseSignal = AbortSignal.any([
+      request.signal,
+      AbortSignal.timeout(HOSTED_BEAN_PARSE_TOTAL_BUDGET_MS),
+    ]);
+    const extraction = await parseHostedBeanInfo(env, user, text, beanParseSignal);
     return json({ ok: true, ...extraction });
   } catch (error) {
     const raw = String((error as Error)?.message ?? error);
@@ -1343,20 +1354,6 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
     if (body.clientRequestId !== undefined && !clientRequestId)
       return json({ ok: false, message: "clientRequestId 格式有误" }, 400);
     const id = clientRequestId ?? crypto.randomUUID();
-    const existing = clientRequestId
-      ? await getItem(env, identity.owner, "recipe", clientRequestId)
-      : null;
-    if (existing) {
-      // A previous response may have been lost after the child row committed but before
-      // its parent feedback was backfilled. Idempotent retries also repair that second write.
-      await backfillRecipeFeedback(env, identity.owner, id, existing.value);
-      return json({
-        ok: true,
-        id,
-        ...(typeof existing.value.version === "number" ? { version: existing.value.version } : {}),
-      });
-    }
-    const createdAt = new Date().toISOString();
     let recipeInput = body.recipe;
     if (
       typeof body.name === "string" &&
@@ -1368,6 +1365,23 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
       recipeInput = { ...(recipeInput as Record<string, unknown>), name: body.name.trim() };
     }
     const normalized = normalizedStoredRecipe(recipeInput);
+    const existing = clientRequestId
+      ? await getItem(env, identity.owner, "recipe", clientRequestId)
+      : null;
+    if (existing) {
+      // A previous response may have been lost after the child row committed but before
+      // its parent feedback was backfilled. Idempotent retries also repair that second write.
+      await backfillRecipeFeedback(env, identity.owner, id, existing.value);
+      return json({
+        ok: true,
+        id,
+        ...(existing.value.recipe ? { recipe: existing.value.recipe } : {}),
+        clamped: normalized.clamped,
+        ...(typeof existing.value.version === "number" ? { version: existing.value.version } : {}),
+        ...(normalized.warning ? { warning: normalized.warning } : {}),
+      });
+    }
+    const createdAt = new Date().toISOString();
     if (!(await ownedBeanExists(env, identity.owner, body.beanId)))
       return json({ ok: false, message: "关联的豆档案不存在" }, 400);
     const parentId =
@@ -1411,15 +1425,20 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
       return json({
         ok: true,
         id,
+        ...(persisted?.value.recipe ? { recipe: persisted.value.recipe } : {}),
+        clamped: normalized.clamped,
         ...(typeof persisted?.value.version === "number"
           ? { version: persisted.value.version }
           : {}),
+        ...(normalized.warning ? { warning: normalized.warning } : {}),
       });
     }
     await backfillRecipeFeedback(env, identity.owner, id, value);
     return json({
       ok: true,
       id,
+      recipe: normalized.recipe,
+      clamped: normalized.clamped,
       ...(typeof value.version === "number" ? { version: value.version } : {}),
       ...(normalized.warning ? { warning: normalized.warning } : {}),
     });
@@ -1470,6 +1489,8 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
       normalizedPatch = { beanId };
     }
 
+    if (!(await getItem(env, identity.owner, "recipe", recipeMatch[1])))
+      return json({ ok: false, message: "配方不存在" }, 404);
     await enforceItemWriteQuota(env, request, identity.owner, "recipe");
     const updated = await mutateItem(env, identity.owner, "recipe", recipeMatch[1], (current) => {
       const nextValue = { ...current, ...normalizedPatch };
@@ -1500,6 +1521,8 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
         { ok: false, message: `反馈格式有误：${parsed.error.issues[0]?.message ?? "字段不完整"}` },
         400,
       );
+    if (!(await getItem(env, identity.owner, "recipe", feedbackMatch[1])))
+      return json({ ok: false, message: "配方不存在" }, 404);
     const feedback = {
       id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
@@ -1536,6 +1559,18 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
     ) {
       return json({ ok: false, message: "结果配方与当前反馈的版本链不匹配" }, 400);
     }
+    const parentRecipe = await getItem(env, identity.owner, "recipe", feedbackPatchMatch[1]);
+    if (!parentRecipe) return json({ ok: false, message: "配方不存在" }, 404);
+    const parentFeedbackExists =
+      Array.isArray(parentRecipe.value.feedbacks) &&
+      parentRecipe.value.feedbacks.some(
+        (value) =>
+          value &&
+          typeof value === "object" &&
+          !Array.isArray(value) &&
+          (value as Record<string, unknown>).id === feedbackPatchMatch[2],
+      );
+    if (!parentFeedbackExists) return json({ ok: false, message: "反馈不存在" }, 404);
     await enforceItemWriteQuota(env, request, identity.owner, "recipe");
     let feedbackFound = false;
     const updated = await mutateItem(
@@ -1610,6 +1645,8 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
         },
         400,
       );
+    if (!(await getItem(env, identity.owner, "bean", beanMatch[1])))
+      return json({ ok: false, message: "豆档案不存在" }, 404);
     await enforceItemWriteQuota(env, request, identity.owner, "bean");
     const value = await mutateItem(env, identity.owner, "bean", beanMatch[1], (current) => {
       const next = { ...current };
@@ -1628,6 +1665,8 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
     const grams = Number(body.grams);
     if (!Number.isFinite(grams) || grams <= 0 || grams > 200)
       return json({ ok: false, message: "单次用豆量需在 0-200g 之间" }, 400);
+    if (!(await getItem(env, identity.owner, "bean", consumeMatch[1])))
+      return json({ ok: false, message: "豆档案不存在" }, 404);
     await enforceItemWriteQuota(env, request, identity.owner, "bean");
     let remainingGrams = 0;
     const value = await mutateItem(env, identity.owner, "bean", consumeMatch[1], (current) => {

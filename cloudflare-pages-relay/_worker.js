@@ -96,6 +96,7 @@ export async function relayRequest(request, env = {}) {
     method: request.method,
     headers,
     redirect: "manual",
+    signal: request.signal,
     ...(hasBody ? { body, duplex: "half" } : {}),
   };
 

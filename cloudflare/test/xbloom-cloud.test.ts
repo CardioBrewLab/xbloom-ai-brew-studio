@@ -3,11 +3,14 @@ import { it } from "node:test";
 import {
   cloudReadbackCompletenessErrors,
   handleXbloomRoute,
+  normalizeXbloomWriteRequestId,
+  newestCloudRecipeId,
   paginateRecipePages,
   parseRecipeVo,
   parseStoredXbloomSession,
   shareUrl,
   verifyCloudRecipeReadback,
+  xbloomWriteAccountScope,
 } from "../src/xbloom-cloud.ts";
 
 const user = { id: "user-1", loginName: "audit", displayName: "Audit" };
@@ -35,6 +38,26 @@ const validRecipe = {
   isSetGrinderSize: 1,
   theColor: "#C9D5B8",
 };
+
+it("Hosted xBloom 幂等记录按区域与 App 账号共同隔离", () => {
+  assert.equal(xbloomWriteAccountScope("cn", 42), "cn:42");
+  assert.notEqual(xbloomWriteAccountScope("cn", 42), xbloomWriteAccountScope("global", 42));
+  assert.notEqual(xbloomWriteAccountScope("cn", 42), xbloomWriteAccountScope("cn", 43));
+});
+
+it("Hosted 恢复遇到多个相同新记录时选定一个而非再次创建", () => {
+  assert.equal(newestCloudRecipeId([]), null);
+  assert.equal(newestCloudRecipeId([{ tableId: 51 }, { tableId: 53 }, { tableId: 52 }]), 53);
+});
+
+it("Hosted xBloom 写入仅接受规范 UUID 幂等号", () => {
+  assert.equal(
+    normalizeXbloomWriteRequestId("550E8400-E29B-41D4-A716-446655440000"),
+    "550e8400-e29b-41d4-a716-446655440000",
+  );
+  assert.equal(normalizeXbloomWriteRequestId("same-request"), null);
+  assert.equal(normalizeXbloomWriteRequestId(undefined), null);
+});
 
 it("旧会话载荷迁移时剔除第三方密码", () => {
   const result = parseStoredXbloomSession({

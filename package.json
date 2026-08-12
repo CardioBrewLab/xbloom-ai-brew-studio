@@ -5,7 +5,7 @@
   "description": "xBloom AI 冲煮工作台 —— LLM 配方生成 / 云端同步 / BLE 实验",
   "license": "MIT",
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.11.0"
   },
   "workspaces": [
     "shared",

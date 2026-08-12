@@ -69,13 +69,34 @@ export const API_BASE_CN = "https://clientcn-api.xbloomcoffee.cn";
 export const SHARE_BASE_GLOBAL = "https://share-h5.xbloom.com";
 export const SHARE_BASE_CN = "https://share-h5.xbloomcoffee.cn";
 
-/** 是否使用中国区后端（.env 的 XBLOOM_REGION=cn） */
-export function isCnRegion(): boolean {
-  return (process.env.XBLOOM_REGION || "").trim().toLowerCase() === "cn";
+export type XbloomRegion = "cn" | "global";
+
+export function defaultXbloomRegion(): XbloomRegion {
+  return (process.env.XBLOOM_REGION || "").trim().toLowerCase() === "cn" ? "cn" : "global";
 }
 
-export const API_BASE = isCnRegion() ? API_BASE_CN : API_BASE_GLOBAL;
-export const SHARE_BASE = isCnRegion() ? SHARE_BASE_CN : SHARE_BASE_GLOBAL;
+export function normalizeXbloomRegion(
+  value: unknown,
+  fallback: XbloomRegion = defaultXbloomRegion(),
+): XbloomRegion {
+  return value === "cn" || value === "global" ? value : fallback;
+}
+
+export function apiBaseForRegion(region: XbloomRegion): string {
+  return region === "cn" ? API_BASE_CN : API_BASE_GLOBAL;
+}
+
+export function shareBaseForRegion(region: XbloomRegion): string {
+  return region === "cn" ? SHARE_BASE_CN : SHARE_BASE_GLOBAL;
+}
+
+/** 是否使用中国区后端（.env 的 XBLOOM_REGION=cn） */
+export function isCnRegion(region: XbloomRegion = defaultXbloomRegion()): boolean {
+  return region === "cn";
+}
+
+export const API_BASE = apiBaseForRegion(defaultXbloomRegion());
+export const SHARE_BASE = shareBaseForRegion(defaultXbloomRegion());
 const r1 = (value: number): number => Math.round(value * 10) / 10;
 
 /** xBloom 服务端 RSA-1024 公钥（DER/base64，照抄 xbloom-agent） */
@@ -92,11 +113,13 @@ const RSA_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----\n${pemBody}\n-----END PUB
 const RSA_CHUNK_PLAIN = 117;
 export const RSA_CHUNK_CIPHER = 128;
 
-const API_HEADERS: Record<string, string> = {
-  "Content-Type": "application/json",
-  Referer: `${SHARE_BASE}/`,
-  "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
-};
+function apiHeaders(region: XbloomRegion): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    Referer: `${shareBaseForRegion(region)}/`,
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
+  };
+}
 
 /** 默认 HTTP 超时（ms） */
 export const HTTP_TIMEOUT_MS = 15_000;
@@ -141,6 +164,7 @@ export function getDispatcher(): Dispatcher | null {
 
 interface JsonRequestOptions {
   timeoutMs?: number;
+  region?: XbloomRegion;
   /**
    * 任务 #98：调用是否幂等（默认 false）。仅 idempotent===true 时保留 404/5xx 有限重试
    * （登录/状态探测/列表查询等只读调用）；非幂等写操作（tuRecipeAdd 建配方等）
@@ -159,6 +183,7 @@ export async function postJson(
 ): Promise<Record<string, unknown>> {
   const dispatcher = getDispatcher();
   const timeoutMs = opts.timeoutMs ?? HTTP_TIMEOUT_MS;
+  const region = opts.region ?? defaultXbloomRegion();
   // undici fetch 的 RequestInit 额外支持 dispatcher；用 undici 自带类型避免与全局 RequestInit 冲突
   // 官方网关偶发对存在的端点返回 404（疑似 LB 后端实例不一致），仅幂等调用对 404/5xx 做有限次重试
   let resp: undici.Response | undefined;
@@ -167,12 +192,12 @@ export async function postJson(
     // 超时预算从首个请求开始累计，导致重试窗口被耗尽、提前误报超时失败
     const init: Record<string, unknown> = {
       method: "POST",
-      headers: API_HEADERS,
+      headers: apiHeaders(region),
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(timeoutMs),
     };
     if (dispatcher) init.dispatcher = dispatcher;
-    resp = await undici.fetch(`${API_BASE}/${endpoint}`, init as UndiciRequestInit);
+    resp = await undici.fetch(`${apiBaseForRegion(region)}/${endpoint}`, init as UndiciRequestInit);
     // 任务 #98：非幂等写操作不重试（首次 404/5xx 时后端可能已落库，重试会重复创建）
     const transient = opts.idempotent === true && (resp.status === 404 || resp.status >= 500);
     if (!transient || attempt >= TRANSIENT_RETRY_COUNT) break;
@@ -218,6 +243,7 @@ export interface CloudSession {
   memberId: number;
   token: string;
   email: string;
+  region: XbloomRegion;
 }
 
 interface ProtectedCloudSession extends DpapiEnvelope {
@@ -245,6 +271,7 @@ function parseCloudSession(value: unknown): CloudSession | null {
     memberId: parsed.memberId,
     token: parsed.token,
     email: typeof parsed.email === "string" ? parsed.email : "",
+    region: normalizeXbloomRegion(parsed.region),
   };
 }
 
@@ -318,7 +345,11 @@ export function clearSession(): void {
 // ---------------------------------------------------------------------------
 
 /** 登录 xBloom 云端账号（明文 JSON，照抄 xbloom-agent 字段；登录幂等可重试，任务 #98） */
-export async function login(email: string, password: string): Promise<CloudSession> {
+export async function login(
+  email: string,
+  password: string,
+  region: XbloomRegion = defaultXbloomRegion(),
+): Promise<CloudSession> {
   const resp = await postJson(
     "tMemberLogin.thtml",
     {
@@ -330,7 +361,7 @@ export async function login(email: string, password: string): Promise<CloudSessi
       email,
       password,
     },
-    { idempotent: true },
+    { idempotent: true, region },
   );
   if (resp.result !== "success") {
     const detail = pickFailureDetail(resp);
@@ -341,7 +372,7 @@ export async function login(email: string, password: string): Promise<CloudSessi
   if (!member || typeof member.tableId !== "number" || !token) {
     throw new Error("登录响应缺少预期字段（member.tableId / token），请重试");
   }
-  const session: CloudSession = { memberId: member.tableId, token, email };
+  const session: CloudSession = { memberId: member.tableId, token, email, region };
   saveSession(session);
   return session;
 }
@@ -355,7 +386,7 @@ export async function ensureSession(): Promise<CloudSession> {
       "未登录 xBloom 云端，且 .env 未配置 XBLOOM_EMAIL/XBLOOM_PASSWORD，请在页面手动登录",
     );
   }
-  return login(config.xbloom.email, config.xbloom.password);
+  return login(config.xbloom.email, config.xbloom.password, defaultXbloomRegion());
 }
 
 /** .env 是否配置了 xBloom 凭据（决定是否具备自动登录能力） */
@@ -429,7 +460,7 @@ export async function withSessionRetry<T>(
       );
     }
     clearSession();
-    session = await login(config.xbloom.email, config.xbloom.password);
+    session = await login(config.xbloom.email, config.xbloom.password, session.region);
     return await op(session);
   }
 }
@@ -441,7 +472,7 @@ export async function withSessionRetry<T>(
 export async function prewarmSession(): Promise<void> {
   if (loadSession() || !hasAutoLoginCredentials()) return;
   try {
-    const session = await login(config.xbloom.email, config.xbloom.password);
+    const session = await login(config.xbloom.email, config.xbloom.password, defaultXbloomRegion());
     console.log(`[xbloom][cloud] 启动预热自动登录成功（${maskEmail(session.email)}）`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -497,9 +528,12 @@ export function shareIdToTableId(shareId: string): string {
 }
 
 /** 生成手机 APP 可导入的分享链接 */
-export function buildShareUrl(tableId: number | string): string {
-  if (isCnRegion()) return "";
-  return `${SHARE_BASE}/?id=${encodeURIComponent(tableIdToShareId(tableId))}`;
+export function buildShareUrl(
+  tableId: number | string,
+  region: XbloomRegion = defaultXbloomRegion(),
+): string {
+  if (isCnRegion(region)) return "";
+  return `${shareBaseForRegion(region)}/?id=${encodeURIComponent(tableIdToShareId(tableId))}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -547,6 +581,71 @@ export interface CloudWriteVerification {
   message: string;
 }
 
+function cloudPourList(value: unknown): Array<Record<string, unknown>> | null {
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    return Array.isArray(parsed) ? (parsed as Array<Record<string, unknown>>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Full executable-field comparison used only to recover a create whose HTTP response was lost. */
+export function cloudRecipeMatchesPayload(
+  row: CloudRecipeSummary,
+  payload: Record<string, unknown>,
+): boolean {
+  const scalarFields: Array<keyof CloudRecipeSummary> = [
+    "theName",
+    "dose",
+    "grandWater",
+    "grinderSize",
+    "rpm",
+    "cupType",
+    "theColor",
+    "isEnableBypassWater",
+    "bypassTemp",
+    "bypassVolume",
+    "isSetGrinderSize",
+  ];
+  if (
+    scalarFields.some((field) =>
+      typeof row[field] === "number"
+        ? Math.abs(Number(row[field]) - Number(payload[field])) > 1e-9
+        : row[field] !== payload[field],
+    )
+  ) {
+    return false;
+  }
+  const expectedPours = cloudPourList(payload.pourDataJSONStr);
+  const actualPours = cloudPourList(row.raw.pourList ?? row.raw.pourDataJSONStr);
+  if (!expectedPours || !actualPours || expectedPours.length !== actualPours.length) return false;
+  const fields = [
+    "theName",
+    "volume",
+    "temperature",
+    "flowRate",
+    "pattern",
+    "pausing",
+    "isEnableVibrationBefore",
+    "isEnableVibrationAfter",
+  ];
+  return expectedPours.every((expected, index) =>
+    fields.every((field) => {
+      const actual = actualPours[index]?.[field];
+      return field === "theName"
+        ? actual === expected[field]
+        : Math.abs(Number(actual) - Number(expected[field])) <= 1e-9;
+    }),
+  );
+}
+
+export function newestCloudRecipeId(
+  rows: ReadonlyArray<Pick<CloudRecipeSummary, "tableId">>,
+): number | null {
+  return rows.length > 0 ? Math.max(...rows.map((row) => row.tableId)) : null;
+}
+
 /** 发布后回读验证报告：云端实际存储的分段与 dose×ratio 等式是否成立（任务#45） */
 export interface CloudIntegrityReport {
   tableId: number;
@@ -579,7 +678,7 @@ export async function readBackCloudRecipe(
   let pourListRaw: unknown = found.raw.pourList;
   if (pourListRaw === undefined || pourListRaw === null) {
     if (!found.shareUrl) throw new Error(`回读验证失败：配方 ${tableId} 无 pourList 且无分享链接`);
-    const { raw } = await fetchSharedRecipe(found.shareUrl);
+    const { raw } = await fetchSharedRecipe(found.shareUrl, options.session?.region);
     const vo = raw.recipeVo as CloudRecipeVo | undefined;
     pourListRaw = vo?.pourList;
   }
@@ -605,50 +704,110 @@ export async function readBackCloudRecipe(
   return { tableId, ok, dose, ratio, expectedTotal, storedPours, storedSum, allInteger, message };
 }
 
+const CREATE_RECOVERY_DELAYS_MS = [0, 250, 750, 1_500] as const;
+
+async function recoverCreatedTableId(
+  session: CloudSession,
+  mapped: CloudPayloadResult,
+  beforeIds: ReadonlySet<number>,
+): Promise<number | null> {
+  let lastError: unknown;
+  for (const delayMs of CREATE_RECOVERY_DELAYS_MS) {
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    try {
+      const matches = (await listMyRecipes({ session })).filter(
+        (row) => !beforeIds.has(row.tableId) && cloudRecipeMatchesPayload(row, mapped.payload),
+      );
+      // Identical creates from another client may race this one. Any matching row
+      // absent from the pre-write snapshot proves that creating again is unsafe;
+      // select a stable newest ID rather than manufacturing an additional duplicate.
+      const recoveredId = newestCloudRecipeId(matches);
+      if (recoveredId !== null) return recoveredId;
+      lastError = undefined;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError !== undefined) throw lastError;
+  return null;
+}
+
+async function completedCreateResult(
+  tableId: number,
+  session: CloudSession,
+  mapped: CloudPayloadResult,
+): Promise<PublishResult> {
+  let shareUrl = buildShareUrl(tableId, session.region);
+  if (isCnRegion(session.region)) {
+    try {
+      const found = (await listMyRecipes({ session })).find((row) => row.tableId === tableId);
+      if (found?.shareUrl) shareUrl = found.shareUrl;
+    } catch {
+      // The row is already created. Missing CN share metadata does not invalidate it.
+    }
+  }
+  const verified = await readBackBestEffort(tableId, session);
+  return {
+    tableId,
+    shareUrl,
+    adjustments: mapped.adjustments,
+    verification: verified.verification,
+    ...(verified.readback ? { readback: verified.readback } : {}),
+  };
+}
+
 /**
  * 发布内部配方到云端账号，返回 tableId 与分享链接。
  * 需要有效会话（先 loadSession，否则传 undefined 走 ensureSession 自动登录）。
  */
 export async function createRecipe(
   recipe: RecipeCore,
-  options: { name?: string; session?: CloudSession } = {},
+  options: { name?: string; session?: CloudSession; beforeIds?: readonly number[] } = {},
 ): Promise<PublishResult> {
   return withSessionRetry(async (session) => {
     const mapped = toCloudPayload(recipe, options.name);
     const payload = { ...authBase(session), ...mapped.payload };
     const encrypted = rsaEncrypt(payload);
+    const beforeIds = options.beforeIds
+      ? new Set(options.beforeIds)
+      : new Set((await listMyRecipes({ session })).map((row) => row.tableId));
+    const recover = () => recoverCreatedTableId(session, mapped, beforeIds);
     // 注意：加密结果本身是 base64 字符串，body 还要再 JSON.stringify 一层（带引号），照抄源码
     // 任务 #98：创建配方是非幂等写操作——保持不重试（默认 idempotent:false），
     // 防「首次 404 但后端已落库」时重试重复创建云端配方
-    const resp = await postJson("tuRecipeAdd.tuhtml", encrypted);
+    let resp: Record<string, unknown>;
+    try {
+      resp = await postJson("tuRecipeAdd.tuhtml", encrypted, { region: session.region });
+    } catch (error) {
+      const recoveredId = await recover();
+      if (recoveredId === null) throw error;
+      resp = { result: "success", tableId: recoveredId };
+    }
     if (resp.result !== "success") {
       if (isAuthFailureResponse(resp)) throw new AuthExpiredError(pickFailureDetail(resp));
+      const recoveredId = await recover();
+      if (recoveredId !== null) resp = { result: "success", tableId: recoveredId };
+    }
+    if (resp.result !== "success") {
       const detail = pickFailureDetail(resp);
       throw new Error(detail ? `发布配方失败：${detail}` : "发布配方失败（云端未返回原因）");
     }
-    const tableId = resp.tableId as number;
-    if (typeof tableId !== "number") {
-      throw new Error("发布成功但响应缺少 tableId");
-    }
-    // 中国区分享 ID 是服务端生成的密文，需从列表接口取官方 shareRecipeLink
-    let shareUrl = buildShareUrl(tableId);
-    if (isCnRegion()) {
-      try {
-        const found = (await listMyRecipes({ session })).find((r) => r.tableId === tableId);
-        if (found?.shareUrl) shareUrl = found.shareUrl;
-      } catch {
-        /* 官方链接暂未返回时保持空分享链接，不猜测中国区 ID。 */
-      }
-    }
-    // 任务#45：发布后回读云端存储值验证 Σ分段 == dose×ratio（best-effort，不阻断发布）
-    const verified = await readBackBestEffort(tableId, session);
-    return {
-      tableId,
-      shareUrl,
-      adjustments: mapped.adjustments,
-      verification: verified.verification,
-      ...(verified.readback ? { readback: verified.readback } : {}),
-    };
+    const responseTableId = typeof resp.tableId === "number" ? resp.tableId : await recover();
+    if (responseTableId === null) throw new Error("发布成功但响应缺少 tableId");
+    return completedCreateResult(responseTableId, session, mapped);
+  }, options.session);
+}
+
+/** Recover a create from its persisted pre-write snapshot without issuing another POST. */
+export async function recoverCreatedRecipe(
+  recipe: RecipeCore,
+  beforeIds: readonly number[],
+  options: { name?: string; session?: CloudSession } = {},
+): Promise<PublishResult | null> {
+  return withSessionRetry(async (session) => {
+    const mapped = toCloudPayload(recipe, options.name);
+    const tableId = await recoverCreatedTableId(session, mapped, new Set(beforeIds));
+    return tableId === null ? null : completedCreateResult(tableId, session, mapped);
   }, options.session);
 }
 
@@ -764,6 +923,7 @@ export async function listMyRecipes(
         };
         const resp = await postJson("tuMyTeaRecipeCreated.tuhtml", rsaEncrypt(payload), {
           idempotent: true,
+          region: session.region,
         });
         if (resp.result !== "success") {
           if (isAuthFailureResponse(resp)) throw new AuthExpiredError(pickFailureDetail(resp));
@@ -800,7 +960,7 @@ export async function listMyRecipes(
           typeof r.shareRecipeLink === "string" && (r.shareRecipeLink as string).startsWith("http")
             ? (r.shareRecipeLink as string)
             : tableId
-              ? buildShareUrl(tableId)
+              ? buildShareUrl(tableId, session.region)
               : "",
         raw: r,
       };
@@ -826,14 +986,16 @@ export async function updateRecipe(
     };
     // 任务 #98：更新配方是写操作——保持不重试（重复下发虽为覆盖写，
     // 但与其他写操作保持一致的保守语义，失败由用户显式重试）
-    const resp = await postJson("tuRecipeUpdate.tuhtml", rsaEncrypt(payload));
+    const resp = await postJson("tuRecipeUpdate.tuhtml", rsaEncrypt(payload), {
+      region: session.region,
+    });
     if (resp.result !== "success") {
       if (isAuthFailureResponse(resp)) throw new AuthExpiredError(pickFailureDetail(resp));
       const detail = pickFailureDetail(resp);
       throw new Error(detail ? `更新配方失败：${detail}` : "更新配方失败（云端未返回原因）");
     }
-    let shareUrl = buildShareUrl(tableId);
-    if (isCnRegion()) {
+    let shareUrl = buildShareUrl(tableId, session.region);
+    if (isCnRegion(session.region)) {
       try {
         const found = (await listMyRecipes({ session })).find((r) => r.tableId === tableId);
         if (found?.shareUrl) shareUrl = found.shareUrl;
@@ -862,6 +1024,7 @@ export async function deleteRecipe(
     const resp = await postJson(
       "tuRecipeDelete.tuhtml",
       rsaEncrypt({ ...authBase(session), tableId }),
+      { region: session.region },
     );
     if (resp.result !== "success") {
       if (isAuthFailureResponse(resp)) throw new AuthExpiredError(pickFailureDetail(resp));
@@ -970,10 +1133,13 @@ export function parseRecipeVo(vo: CloudRecipeVo): Recipe {
  */
 export async function fetchSharedRecipe(
   shareId: string,
+  requestedRegion: XbloomRegion = defaultXbloomRegion(),
 ): Promise<{ recipe: Recipe; raw: Record<string, unknown> }> {
   let id = shareId.trim();
+  let region = requestedRegion;
   if (id.includes("share-h5.xbloom.com") || id.includes("share-h5.xbloomcoffee.cn")) {
     const url = new URL(id);
+    region = url.hostname === new URL(SHARE_BASE_CN).hostname ? "cn" : "global";
     const param = url.searchParams.get("id");
     if (!param) throw new Error(`分享链接缺少 id 参数: ${shareId}`);
     id = param;
@@ -985,7 +1151,7 @@ export async function fetchSharedRecipe(
       interfaceVersion: 19700101,
       skey: "testskey",
     },
-    { idempotent: true }, // 任务 #98：免登录只读查询，幂等可重试
+    { idempotent: true, region }, // 任务 #98：免登录只读查询，幂等可重试
   );
   if (resp.result !== "success") {
     const detail = pickFailureDetail(resp);
@@ -1016,6 +1182,7 @@ export interface ReachabilityReport {
  */
 export async function checkReachable(
   timeoutMs: number = PROBE_TIMEOUT_MS,
+  region: XbloomRegion = defaultXbloomRegion(),
 ): Promise<ReachabilityReport> {
   const used = proxyUrl();
   const dispatcher = getDispatcher();
@@ -1025,7 +1192,7 @@ export async function checkReachable(
   };
   if (dispatcher) init.dispatcher = dispatcher;
   try {
-    const resp = await undici.fetch(SHARE_BASE, init as UndiciRequestInit);
+    const resp = await undici.fetch(shareBaseForRegion(region), init as UndiciRequestInit);
     return {
       reachable: true,
       proxyUsed: Boolean(used),

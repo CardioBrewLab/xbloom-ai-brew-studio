@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { cloudPublishTarget, shouldBindCloudRecord } from "../src/lib/cloud-publish-state.js";
+import {
+  cloudAccountKey,
+  cloudPublishTarget,
+  pendingPublishForAccount,
+  shouldBindCloudRecord,
+} from "../src/lib/cloud-publish-state.js";
 
 describe("云端写入确认状态", () => {
   it("只把 verified 记录写入本地绑定", () => {
@@ -14,6 +19,7 @@ describe("云端写入确认状态", () => {
       tableId: "CLOUD-1",
       shareUrl: "https://share.example/CLOUD-1",
       region: "global" as const,
+      accountKey: "global:MEMBER-1",
       recipeKey: "recipe-1",
     };
     assert.deepEqual(cloudPublishTarget(undefined, pending), {
@@ -25,5 +31,21 @@ describe("云端写入确认状态", () => {
       tableId: "IMPORTED-1",
     });
     assert.deepEqual(cloudPublishTarget(undefined), { mode: "create" });
+  });
+
+  it("待确认记录只属于创建它的 xBloom 账号", () => {
+    const pending = {
+      tableId: "CLOUD-1",
+      shareUrl: "",
+      region: "cn" as const,
+      accountKey: "cn:MEMBER-1",
+      recipeKey: "recipe-1",
+    };
+    assert.equal(
+      cloudAccountKey({ memberId: "MEMBER-1", region: "cn" }, "global"),
+      pending.accountKey,
+    );
+    assert.equal(pendingPublishForAccount(pending, "cn:MEMBER-1"), pending);
+    assert.equal(pendingPublishForAccount(pending, "cn:MEMBER-2"), undefined);
   });
 });

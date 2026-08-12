@@ -90,9 +90,40 @@ describe("前端边界修复", () => {
     const api = readFileSync(new URL("../src/lib/api.ts", import.meta.url), "utf8");
     const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
     assert.match(modal, /cloudPublishPreview\(previewSrc, undefined, selectedCloudRegion\)/);
-    assert.match(modal, /cloudPublishTarget\(cloudTableId, pendingCloudPublish\)/);
-    assert.match(api, /cloudPublish: \(recipe: Recipe, name\?: string, region\?: CloudRegion\)/);
+    assert.match(modal, /pendingPublishForAccount\(/);
+    assert.match(modal, /activePendingCloudPublish \?\? recoveredPendingCloudPublish/);
+    assert.match(modal, /onPendingPublished\?\.\(\{/);
+    assert.doesNotMatch(app, /pendingCloudPublish\.recipeKey === JSON\.stringify\(recipe\)/);
+    assert.equal((modal.match(/recipeKey: JSON\.stringify\(recipe\)/g) ?? []).length, 3);
+    assert.equal((modal.match(/accountKey: currentCloudAccountKey/g) ?? []).length, 2);
+    assert.doesNotMatch(modal, /recipeKey: JSON\.stringify\(draft\)/);
+    assert.match(api, /cloudPublish:[\s\S]*clientRequestId\?: string/);
+    assert.match(modal, /cloudPublish\(\s*checkpoint\.recipe,[\s\S]*checkpoint\.requestId/);
+    assert.match(modal, /prepareCloudPublishRequest\(/);
+    assert.match(modal, /markCloudPublishRequestCreated\(/);
+    assert.equal((modal.match(/clearCloudPublishRequestCheckpoint\(/g) ?? []).length, 3);
+    assert.match(
+      modal,
+      /\[cloud\?\.region, cloudRegionProp, currentCloudAccountKey, open, recipe\]/,
+    );
+    assert.match(app, /publishRequestId=\{cloudPublishRequestId\}/);
+    const sourceCapture = app.indexOf("const publishedSourceRecipe = activeRecipeRef.current");
+    const cloudBind = app.indexOf("await bindVerifiedCloudRecipe(tableId)", sourceCapture);
+    assert.ok(sourceCapture > 0 && cloudBind > sourceCapture);
+    assert.match(
+      app.slice(cloudBind),
+      /clearPersistentCloudPublishRequestId\(\s*publishedSourceRecipe/,
+    );
+    const generateStart = app.indexOf("const generate = useCallback");
+    const recipeEvent = app.indexOf('case "recipe":', generateStart);
+    const pendingClear = app.indexOf("setPendingCloudPublish(null)", generateStart);
+    assert.ok(recipeEvent > generateStart && pendingClear > recipeEvent);
     assert.match(api, /cloudRecipes: \(region\?: CloudRegion\)/);
+    const cloudPage = readFileSync(new URL("../src/pages/CloudPage.tsx", import.meta.url), "utf8");
+    assert.match(cloudPage, /\[cloudAccountIdentity, loggedIn, refresh\]/);
+    const publishPanel = source("PublishPanel.tsx");
+    assert.match(publishPanel, /cloudLogin\(email\.trim\(\), password, cloudRegion\)/);
+    assert.match(publishPanel, /aria-label="xBloom 账号区域"/);
     assert.match(app, /saveWarning=\{serverSaveWarning\}/);
   });
 

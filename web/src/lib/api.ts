@@ -119,6 +119,8 @@ export interface CloudStatus {
   passwordStored?: boolean;
   /** 当前登录账号邮箱（已登录时返回） */
   email?: string;
+  /** 当前 xBloom 账号标识；仅用于隔离本浏览器内的待确认发布。 */
+  memberId?: string;
   region?: "cn" | "global";
 }
 
@@ -807,19 +809,27 @@ export const api = {
   // ---- 云端 ----
   cloudStatus: () => request<CloudStatus>("/api/cloud/status"),
   cloudLogin: (email: string, password: string, region?: CloudRegion) =>
-    request<{ ok: boolean; memberId: string; email: string }>("/api/cloud/login", {
-      method: "POST",
-      body: JSON.stringify({ email, password, ...(region ? { region } : {}) }),
-    }),
+    request<{ ok: boolean; memberId: string; email: string; region: CloudRegion }>(
+      "/api/cloud/login",
+      {
+        method: "POST",
+        body: JSON.stringify({ email, password, ...(region ? { region } : {}) }),
+      },
+    ),
   cloudLogout: (region?: CloudRegion) =>
     request<{ ok: boolean }>("/api/cloud/logout", {
       method: "POST",
       ...(region ? { body: JSON.stringify({ region }) } : {}),
     }),
-  cloudPublish: (recipe: Recipe, name?: string, region?: CloudRegion) =>
+  cloudPublish: (recipe: Recipe, name?: string, region?: CloudRegion, clientRequestId?: string) =>
     request<CloudPublishResult>("/api/cloud/publish", {
       method: "POST",
-      body: JSON.stringify({ recipe, name, ...(region ? { region } : {}) }),
+      body: JSON.stringify({
+        recipe,
+        name,
+        ...(region ? { region } : {}),
+        ...(clientRequestId ? { clientRequestId } : {}),
+      }),
     }),
   /** 发布前预演：返回对齐官方 ratio 0.1 步进后实际上传的总水量/分段与调整说明（任务 #39） */
   cloudPublishPreview: (recipe: Recipe, name?: string, region?: CloudRegion) =>

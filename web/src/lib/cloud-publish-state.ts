@@ -10,7 +10,23 @@ export interface PendingCloudPublish {
   tableId: string;
   shareUrl: string;
   region: CloudRegion;
+  accountKey: string;
   recipeKey: string;
+}
+
+export function cloudAccountKey(
+  cloud: { memberId?: string; email?: string; region?: CloudRegion } | null | undefined,
+  fallbackRegion: CloudRegion,
+): string {
+  const accountId = cloud?.memberId ?? cloud?.email;
+  return accountId ? `${cloud?.region ?? fallbackRegion}:${accountId}` : "";
+}
+
+export function pendingPublishForAccount(
+  pending: PendingCloudPublish | undefined,
+  accountKey: string,
+): PendingCloudPublish | undefined {
+  return accountKey && pending?.accountKey === accountKey ? pending : undefined;
 }
 
 /** Reopen/retry a pending write against its existing cloud row instead of creating a second row. */

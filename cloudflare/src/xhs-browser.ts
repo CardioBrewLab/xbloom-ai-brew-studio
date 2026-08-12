@@ -384,6 +384,7 @@ async function sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
 async function launchBrowser(
   env: XhsBrowserEnv & { BROWSER: BrowserWorker },
   signal = new AbortController().signal,
+  onAcquisitionStarted: () => void = () => {},
 ): Promise<Browser> {
   const waitForAcquisition = async (fallbackMs: number): Promise<void> => {
     let waitMs = fallbackMs;
@@ -401,6 +402,7 @@ async function launchBrowser(
 
   await waitForAcquisition(0);
   try {
+    onAcquisitionStarted();
     return await launchBrowserWithAbort(
       puppeteer.launch(env.BROWSER, { keep_alive: BROWSER_KEEP_ALIVE_MS }),
       signal,
@@ -409,6 +411,7 @@ async function launchBrowser(
     // 官方 limits 返回下一次允许 acquisition 的等待时间；按该窗口补一次。
     await waitForAcquisition(2_000);
     try {
+      onAcquisitionStarted();
       return await launchBrowserWithAbort(
         puppeteer.launch(env.BROWSER, { keep_alive: BROWSER_KEEP_ALIVE_MS }),
         signal,
@@ -953,8 +956,9 @@ async function qrcode(env: XhsBrowserEnv, owner: string): Promise<Response> {
     await closeBrowserSession(env, current?.qr_session_id ?? "");
     await clearQrState(env, owner);
 
-    browser = await launchBrowser(env);
-    browserStarted = true;
+    browser = await launchBrowser(env, undefined, () => {
+      browserStarted = true;
+    });
     const page = await browser.newPage();
     await preparePage(page);
     const qrResponsePromise = page
@@ -1088,8 +1092,9 @@ async function cookieImport(
   let browserStarted = false;
   let completed = false;
   try {
-    browser = await launchBrowser(env);
-    browserStarted = true;
+    browser = await launchBrowser(env, undefined, () => {
+      browserStarted = true;
+    });
     const page = await browser.newPage();
     await preparePage(page);
     await page.setCookie(...cookies);
@@ -1201,8 +1206,9 @@ export async function researchXhsWithBrowser(
     if (!budgetClaim) {
       return empty("今日云端小红书检索预算已用完，本次继续使用豆档案与模型知识生成");
     }
-    browser = await launchBrowser(env, signal);
-    browserStarted = true;
+    browser = await launchBrowser(env, signal, () => {
+      browserStarted = true;
+    });
     const page = await withAbort(browser.newPage(), signal);
     await withAbort(preparePage(page), signal);
     await withAbort(page.setCookie(...cookies), signal);

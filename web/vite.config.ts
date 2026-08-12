@@ -16,17 +16,25 @@ export function resolveApiProxyTarget(value: string | undefined): string {
     parsed.password ||
     parsed.search ||
     parsed.hash ||
+    parsed.pathname !== "/" ||
     !parsed.hostname ||
-    (parsed.port && (!Number.isInteger(Number(parsed.port)) || Number(parsed.port) < 1 || Number(parsed.port) > 65535))
+    (parsed.port &&
+      (!Number.isInteger(Number(parsed.port)) ||
+        Number(parsed.port) < 1 ||
+        Number(parsed.port) > 65535))
   ) {
-    throw new Error("VITE_API_PROXY_TARGET must be an absolute HTTP(S) URL without credentials, query, or hash.");
+    throw new Error(
+      "VITE_API_PROXY_TARGET must be an HTTP(S) origin without credentials, path, query, or hash.",
+    );
   }
   return parsed.toString().replace(/\/$/, "");
 }
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const target = resolveApiProxyTarget(process.env.VITE_API_PROXY_TARGET || env.VITE_API_PROXY_TARGET);
+  const target = resolveApiProxyTarget(
+    process.env.VITE_API_PROXY_TARGET || env.VITE_API_PROXY_TARGET,
+  );
   return {
     plugins: [react(), tailwindcss()],
     build: {

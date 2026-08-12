@@ -79,6 +79,23 @@ describe("前端边界修复", () => {
     assert.match(settings, /thirdModel: ""/);
   });
 
+  it("desktop and mobile navigation expose the current page", () => {
+    const header = source("AppHeader.tsx");
+    assert.match(header, /aria-label="桌面端主导航"/);
+    assert.equal((header.match(/aria-current=\{active \? "page" : undefined\}/g) ?? []).length, 2);
+  });
+
+  it("cloud region reaches preview APIs and pending writes reuse the update path", () => {
+    const modal = source("PublishPreviewModal.tsx");
+    const api = readFileSync(new URL("../src/lib/api.ts", import.meta.url), "utf8");
+    const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+    assert.match(modal, /cloudPublishPreview\(previewSrc, undefined, selectedCloudRegion\)/);
+    assert.match(modal, /cloudPublishTarget\(cloudTableId, pendingCloudPublish\)/);
+    assert.match(api, /cloudPublish: \(recipe: Recipe, name\?: string, region\?: CloudRegion\)/);
+    assert.match(api, /cloudRecipes: \(region\?: CloudRegion\)/);
+    assert.match(app, /saveWarning=\{serverSaveWarning\}/);
+  });
+
   it("冲煮结束态区分机器注水、旁路补水与最终总水量", () => {
     const guide = source("BrewGuide.tsx");
     assert.match(guide, /冲煮结束后加入/);

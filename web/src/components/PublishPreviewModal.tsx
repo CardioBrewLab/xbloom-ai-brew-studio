@@ -7,8 +7,12 @@
  */
 import { useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
-import { api, type CloudStatus } from "../lib/api.js";
-import { shouldBindCloudRecord } from "../lib/cloud-publish-state.js";
+import { api, type CloudRegion, type CloudStatus } from "../lib/api.js";
+import {
+  cloudPublishTarget,
+  shouldBindCloudRecord,
+  type PendingCloudPublish,
+} from "../lib/cloud-publish-state.js";
 import { CUP_TYPES, type Recipe } from "../lib/recipe-schema.js";
 import { PATTERN_LABELS } from "../lib/curve-math.js";
 import { btnGhost, btnPrimary, Field, inputCls, Modal, Spinner } from "./ui.js";
@@ -34,6 +38,12 @@ export interface PublishPreviewModalProps {
   onLoggedIn?: () => void;
   /** 云端来源 tableId（从云端导入的配方）：存在时发布走更新而非新建 */
   cloudTableId?: string;
+  /** 上次写入已创建但回读待确认时的记录；重开弹窗继续更新该记录。 */
+  pendingCloudPublish?: PendingCloudPublish;
+  /** 记录待确认的云端写入，避免关闭弹窗后丢失 tableId。 */
+  onPendingPublished?: (pending: PendingCloudPublish) => void;
+  /** 当前云端账号区域；未登录时仍可在弹窗内选择。 */
+  cloudRegion?: CloudRegion;
   /** 发布/更新成功后回传 tableId，供外层后续发布改走更新链路 */
   onPublished?: (tableId: string) => void | Promise<void>;
 }
@@ -45,6 +55,9 @@ export default function PublishPreviewModal({
   cloud,
   onLoggedIn,
   cloudTableId,
+  pendingCloudPublish,
+  onPendingPublished,
+  cloudRegion: cloudRegionProp,
   onPublished,
 }: PublishPreviewModalProps) {
   const [draft, setDraft] = useState<Recipe | null>(null);
@@ -64,6 +77,7 @@ export default function PublishPreviewModal({
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loggingIn, setLoggingIn] = useState(false);
+  const [selectedCloudRegion, setSelectedCloudRegion] = useState<CloudRegion>("cn");
   /** 发布预演：后端对齐官方 ratio 0.1 步进后实际上传的值（任务 #39） */
   const [preview, setPreview] = useState<{
     adjustments: string[];
@@ -80,6 +94,7 @@ export default function PublishPreviewModal({
   // 每次打开 → 以当前配方初始化草稿
   useEffect(() => {
     if (open && recipe) {
+      const region = pendingCloudPublish?.region ?? cloudRegionProp ?? cloud?.region ?? "cn";
       setDraft(JSON.parse(JSON.stringify(recipe)) as Recipe);
       setPublishName(recipe.name);
       setShareUrl("");
@@ -90,6 +105,7 @@ export default function PublishPreviewModal({
       setPreview(null);
       setPreviewError("");
       setPublishAdjustments([]);
+      setSelectedCloudRegion(region);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -111,7 +127,7 @@ export default function PublishPreviewModal({
     }
     let cancelled = false;
     api
-      .cloudPublishPreview(previewSrc)
+      .cloudPublishPreview(previewSrc, undefined, selectedCloudRegion)
       .then((r) => {
         if (cancelled) return;
         if (r.ok) {
@@ -139,7 +155,7 @@ export default function PublishPreviewModal({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, alignKey, cloud?.loggedIn]);
+  }, [open, alignKey, cloud?.loggedIn, selectedCloudRegion]);
 
   // 渲染二维码
   useEffect(() => {
@@ -154,6 +170,8 @@ export default function PublishPreviewModal({
   if (!recipe) return null;
   const d = draft ?? recipe;
   const loggedIn = cloud?.loggedIn ?? false;
+  const publishTarget = cloudPublishTarget(cloudTableId, pendingCloudPublish);
+  const publishRegion = pendingCloudPublish?.region ?? selectedCloudRegion;
 
   const setPourName = (i: number, name: string) =>
     setDraft((prev) =>
@@ -167,7 +185,7 @@ export default function PublishPreviewModal({
     setLoggingIn(true);
     setError("");
     try {
-      await api.cloudLogin(email.trim(), password);
+      await api.cloudLogin(email.trim(), password, selectedCloudRegion);
       setPassword("");
       onLoggedIn?.();
     } catch (e) {
@@ -183,23 +201,45 @@ export default function PublishPreviewModal({
     setError("");
     try {
       const name = publishName.trim() || undefined;
-      if (cloudTableId) {
+      if (publishTarget.tableId) {
         // 云端来源配方 → 更新原记录，不新建重复配方
-        const res = await api.cloudUpdateRecipe(cloudTableId, { recipe: draft, name });
+        const res = await api.cloudUpdateRecipe(
+          publishTarget.tableId,
+          { recipe: draft, name },
+          publishRegion,
+        );
         setPublishedMode("update");
         setShareUrl(res.shareUrl);
         setTableId(res.tableId);
         setPublishAdjustments(res.adjustments ?? []);
         setPublishVerification(res.verification);
-        if (shouldBindCloudRecord(res.verification)) await onPublished?.(String(res.tableId));
+        if (shouldBindCloudRecord(res.verification)) {
+          await onPublished?.(String(res.tableId));
+        } else {
+          onPendingPublished?.({
+            tableId: String(res.tableId),
+            shareUrl: res.shareUrl,
+            region: publishRegion,
+            recipeKey: JSON.stringify(draft),
+          });
+        }
       } else {
-        const res = await api.cloudPublish(draft, name);
+        const res = await api.cloudPublish(draft, name, publishRegion);
         setPublishedMode("create");
         setShareUrl(res.shareUrl);
         setTableId(res.tableId);
         setPublishAdjustments(res.adjustments ?? []);
         setPublishVerification(res.verification);
-        if (shouldBindCloudRecord(res.verification)) await onPublished?.(String(res.tableId));
+        if (shouldBindCloudRecord(res.verification)) {
+          await onPublished?.(String(res.tableId));
+        } else {
+          onPendingPublished?.({
+            tableId: String(res.tableId),
+            shareUrl: res.shareUrl,
+            region: publishRegion,
+            recipeKey: JSON.stringify(draft),
+          });
+        }
       }
     } catch (e) {
       setError((e as Error).message);
@@ -213,7 +253,7 @@ export default function PublishPreviewModal({
     setPublishing(true);
     setError("");
     try {
-      const res = await api.cloudVerifyRecipe(tableId);
+      const res = await api.cloudVerifyRecipe(tableId, publishRegion);
       setPublishVerification(res.verification);
       if (shouldBindCloudRecord(res.verification)) await onPublished?.(tableId);
     } catch (reason) {
@@ -342,6 +382,30 @@ export default function PublishPreviewModal({
           <p className="text-[11px] leading-relaxed text-[var(--tx-3)]">
             在线工作台仅保存加密会话令牌；密码只用于本次登录请求。
           </p>
+          <Field label="账号区域" hint="与 xBloom App 的账号区域保持一致">
+            <div className="grid grid-cols-2 gap-2 rounded-xl border border-[var(--line)] bg-[var(--bg-inset)] p-1">
+              {(
+                [
+                  ["cn", "中国区"],
+                  ["global", "全球区"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={selectedCloudRegion === value}
+                  onClick={() => setSelectedCloudRegion(value)}
+                  className={`rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+                    selectedCloudRegion === value
+                      ? "bg-[var(--bg-card)] text-[var(--tx-1)] shadow-sm"
+                      : "text-[var(--tx-3)]"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </Field>
           <Field label="密码">
             <input
               type="password"
@@ -370,6 +434,11 @@ export default function PublishPreviewModal({
       ) : (
         /* -------- 字段预览与编辑 -------- */
         <div className="space-y-4">
+          {publishTarget.tableId && !cloudTableId && (
+            <p className="rounded-xl border border-[var(--acc-line)] bg-[var(--acc-soft)] px-3 py-2 text-xs text-[var(--tx-2)]">
+              检测到上次发布记录，将继续更新该云端记录，避免重复创建。
+            </p>
+          )}
           {/* 预演失败降级提示：不误呈"无需对齐"（Kim 审查） */}
           {previewError && (
             <div className="rounded-xl border border-[var(--line-strong)] bg-[var(--bg-inset)] px-3 py-2 text-xs text-[var(--tx-2)]">
@@ -541,10 +610,10 @@ export default function PublishPreviewModal({
             >
               {publishing ? (
                 <>
-                  <Spinner /> {cloudTableId ? "更新中…" : "发布中…"}
+                  <Spinner /> {publishTarget.tableId ? "更新中…" : "发布中…"}
                 </>
-              ) : cloudTableId ? (
-                `更新云端配方 ${cloudTableId}`
+              ) : publishTarget.tableId ? (
+                `更新云端配方 ${publishTarget.tableId}`
               ) : (
                 "确认发布到云端"
               )}

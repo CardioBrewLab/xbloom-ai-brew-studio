@@ -83,4 +83,47 @@ describe("Cloudflare Pages API Relay", () => {
       message: "API Relay 上游暂时不可用",
     });
   });
+
+  test("chunked API bodies are bounded before relay forwarding", async () => {
+    let bytesRead = 0;
+    const chunk = new Uint8Array(64 * 1024);
+    const body = new ReadableStream({
+      pull(controller) {
+        bytesRead += chunk.byteLength;
+        controller.enqueue(chunk);
+      },
+    });
+    globalThis.fetch = async (request) => {
+      await request.arrayBuffer();
+      return new Response("unexpected upstream response", { status: 200 });
+    };
+    const response = await relay.fetch(
+      new Request("https://relay.example/api/generate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        duplex: "half",
+      }),
+      { UPSTREAM_ORIGIN: "https://worker.example/" },
+    );
+    assert.equal(response.status, 413);
+    assert.ok(bytesRead <= 393216, `read ${bytesRead} bytes`);
+  });
+
+  test("client cancellation propagates to the upstream request", async () => {
+    let captured;
+    globalThis.fetch = async (request) => {
+      captured = request;
+      return new Response(null, { status: 204 });
+    };
+    const controller = new AbortController();
+    const response = await relayRequest(
+      new Request("https://relay.example/api/status", { signal: controller.signal }),
+      { UPSTREAM_ORIGIN: "https://worker.example/" },
+    );
+    assert.equal(response.status, 204);
+    assert.equal(captured.signal.aborted, false);
+    controller.abort(new Error("client left"));
+    assert.equal(captured.signal.aborted, true);
+  });
 });

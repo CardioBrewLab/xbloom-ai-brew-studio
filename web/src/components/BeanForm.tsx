@@ -104,6 +104,11 @@ export interface BeanParseState {
   error?: string;
 }
 
+/** Only the latest parse request may publish a result into the form. */
+export function parseRequestIsCurrent(startedId: number, currentId: number): boolean {
+  return startedId === currentId;
+}
+
 const PARSE_ACTION_FROM: Record<string, readonly BeanParsePhase[]> = {
   PARSE_START: ["idle", "done", "error", "applied"],
   PARSE_OK: ["loading"],
@@ -278,6 +283,7 @@ export default function BeanForm({
   /** 手动「补充」加行的 null 字段 */
   const [extraRows, setExtraRows] = useState<ReadonlySet<keyof ParsedBeanInfo>>(new Set());
   const appliedPrefillRevisionRef = useRef<number | null>(null);
+  const parseRequestIdRef = useRef(0);
 
   useEffect(() => {
     if (!prefillBean || appliedPrefillRevisionRef.current === prefillBean.revision) return;
@@ -326,16 +332,21 @@ export default function BeanForm({
 
   /** 原文变更 → 回到可重新解析态（结果卡片不再代表当前文本） */
   const onPasteChange = (v: string) => {
+    parseRequestIdRef.current += 1;
     setPasteText(v);
-    if (parsePhase === "done" || parsePhase === "applied" || parsePhase === "error") {
+    if (parsePhase === "loading") {
+      setParseState({ phase: "idle" });
+    } else if (parsePhase === "done" || parsePhase === "applied" || parsePhase === "error") {
       setParseState(beanParseTransition(parseState, "RESET"));
     }
   };
 
   const runAiParse = async () => {
     if (!pasteText.trim() || parsePhase === "loading") return;
+    const requestId = ++parseRequestIdRef.current;
     setParseState(beanParseTransition(parseState, "PARSE_START"));
     const res = await parseBeanInfo(pasteText.trim());
+    if (!parseRequestIsCurrent(requestId, parseRequestIdRef.current)) return;
     if (res.ok && res.parsed) {
       setParsed(res.parsed);
       setDraft({});

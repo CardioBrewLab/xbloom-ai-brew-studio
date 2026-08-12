@@ -27,6 +27,7 @@ import {
   type Bean,
   type BrewFeedback,
   type BrewRationaleItem,
+  type CloudRegion,
   type CloudStatus,
   type GenerateRequest,
   type ResearchSource,
@@ -56,8 +57,14 @@ import {
   type VariantState,
 } from "./lib/variant.js";
 import { saveCompletionIsCurrent } from "./lib/save-state.js";
+import { savedRecipePairState, savedRecipeState } from "./lib/saved-recipe.js";
+import type { PendingCloudPublish } from "./lib/cloud-publish-state.js";
 import { hostedPage } from "./lib/companion.js";
 import { createRequestId } from "./lib/request-id.js";
+import {
+  clearPersistentCloudPublishRequestId,
+  persistentCloudPublishRequestId,
+} from "./lib/cloud-publish-request.js";
 import {
   INTERFACE_MODE_STORAGE_KEY,
   readInterfaceMode,
@@ -227,6 +234,9 @@ export default function App() {
   // ---- 后端能力 / 连接状态 ----
   const [config, setConfig] = useState<ServerConfig | null>(null);
   const [cloud, setCloud] = useState<CloudStatus | null>(null);
+  const [cloudRegion, setCloudRegion] = useState<CloudRegion>("cn");
+  const cloudRegionTouchedRef = useRef(false);
+  const cloudRefreshRequestRef = useRef(0);
   const [backendUp, setBackendUp] = useState(true);
   const [account, setAccount] = useState<AuthSession | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -235,6 +245,12 @@ export default function App() {
     try {
       const next = await api.getConfig();
       setConfig(next);
+      if (
+        !cloudRegionTouchedRef.current &&
+        (next.cloudRegion === "cn" || next.cloudRegion === "global")
+      ) {
+        setCloudRegion(next.cloudRegion);
+      }
       setBackendUp(true);
       return next;
     } catch {
@@ -243,11 +259,21 @@ export default function App() {
     }
   }, []);
 
-  const refreshCloud = useCallback(() => {
-    api
-      .cloudStatus()
-      .then(setCloud)
-      .catch(() => setCloud(null));
+  const refreshCloud = useCallback(async () => {
+    const requestId = ++cloudRefreshRequestRef.current;
+    try {
+      const next = await api.cloudStatus();
+      if (requestId !== cloudRefreshRequestRef.current) return;
+      if (!cloudRegionTouchedRef.current && next.region) setCloudRegion(next.region);
+      setCloud(next);
+    } catch {
+      if (requestId === cloudRefreshRequestRef.current) setCloud(null);
+    }
+  }, []);
+
+  const selectCloudRegion = useCallback((region: CloudRegion) => {
+    cloudRegionTouchedRef.current = true;
+    setCloudRegion(region);
   }, []);
 
   useEffect(() => {
@@ -354,6 +380,7 @@ export default function App() {
   const [beanPrefill, setBeanPrefill] = useState<{ beanId: string; revision: number }>();
   const beanPrefillRevisionRef = useRef(0);
   const [clamped, setClamped] = useState<string[]>([]);
+  const [serverSaveWarning, setServerSaveWarning] = useState("");
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | undefined>(undefined);
   /** 当前本地历史条目；用于把回读确认后的云端 tableId 原子绑定到正确条目。 */
@@ -379,6 +406,14 @@ export default function App() {
   const cloudBindRef = useRef<CloudBindCheckpoint | null>(null);
   /** 云端来源 tableId：从云端导入时记录，发布时存在则走更新（PUT）而非新建 */
   const [cloudTableId, setCloudTableId] = useState<string | null>(null);
+  /** 云端写入已创建但回读待确认时保留记录，关闭/重开发布弹窗仍走更新。 */
+  const [pendingCloudPublish, setPendingCloudPublish] = useState<PendingCloudPublish | null>(null);
+  /** 新建云端配方的稳定幂等号：弹窗关闭、网络断开后重试仍复用。 */
+  const [cloudPublishRequestId, setCloudPublishRequestId] = useState(() => createRequestId());
+  useEffect(() => {
+    if (!recipe || cloudTableId) return;
+    setCloudPublishRequestId(persistentCloudPublishRequestId(recipe, window.localStorage));
+  }, [cloudTableId, recipe]);
   /** 反馈调参上下文（ref：generate 闭包内读取，避免状态过期） */
   const regenCtxRef = useRef<RegenContext | null>(null);
   /** 调参 Diff 摘要（有 baseRecipe 的生成完成后展示） */
@@ -450,9 +485,43 @@ export default function App() {
       replaceActiveRecipe(next);
       setSavedAt(undefined);
       setLocalRecipeId(null);
+      setServerSaveWarning("");
     },
     [replaceActiveRecipe],
   );
+
+  /** 保存响应中的服务端归一化配方是工作台下一次渲染的权威快照。 */
+  const syncServerSavedRecipe = useCallback((saved: GeneratedSaveResult, submitted: Recipe) => {
+    const next = savedRecipeState(saved, submitted);
+    if (next.normalized) {
+      activeRecipeRef.current = next.recipe;
+      setRecipe(next.recipe);
+      if (activeVariantRef.current === "original") {
+        setOriginalRecipe(next.recipe);
+      } else {
+        setVariant((state) =>
+          state.improved
+            ? { ...state, improved: { ...state.improved, recipe: next.recipe } }
+            : state,
+        );
+      }
+    }
+    if (next.clamped) {
+      setClamped(next.clamped);
+      if (activeVariantRef.current === "original") {
+        setOriginalClamped(next.clamped);
+      } else {
+        setVariant((state) =>
+          state.improved
+            ? { ...state, improved: { ...state.improved, clamped: next.clamped! } }
+            : state,
+        );
+      }
+    }
+    setServerSaveWarning(
+      next.warning ?? (next.clamped?.length ? "服务端保存时已将越界参数钳位到安全区间。" : ""),
+    );
+  }, []);
 
   /** 豆仓推荐/豆卡直达工作台，保留 BeanForm 现有输入并只替换所选豆。 */
   const startFromBean = useCallback((beanId: string) => {
@@ -472,6 +541,7 @@ export default function App() {
       generatedPairSaveRef.current = null;
       generatedPairOriginalSaveRef.current = null;
       cloudBindRef.current = null;
+      setServerSaveWarning("");
       const controller = new AbortController();
       abortRef.current = controller;
       const genId = ++generationIdRef.current;
@@ -643,6 +713,8 @@ export default function App() {
                   setSavedAt(undefined);
                   setLocalRecipeId(null);
                   setCloudTableId(null);
+                  setPendingCloudPublish(null);
+                  setCloudPublishRequestId(createRequestId());
                   setTuningDiff(null);
                   setAutoSavedNote("");
                   setGenMeta(null);
@@ -730,6 +802,7 @@ export default function App() {
                               recipeRevisionRef.current,
                             );
                           if (!isCurrent()) return;
+                          syncServerSavedRecipe(res, newRecipe);
                           // 双保险回填：POST 时已自动回填，PATCH 兼容 feedbackId 晚到/丢失场景
                           if (ctx.feedbackId) {
                             await api
@@ -799,6 +872,7 @@ export default function App() {
                             recipeRevision !== recipeRevisionRef.current
                           )
                             return;
+                          syncServerSavedRecipe(saved, event.recipe);
                           setSavedAt(Date.now());
                           setLocalRecipeId(saved.id);
                           setAutoSavedNote("已自动保存到冲煮历史");
@@ -840,7 +914,7 @@ export default function App() {
       };
       void runGeneration();
     },
-    [invalidatePendingSave, replaceActiveRecipe],
+    [invalidatePendingSave, replaceActiveRecipe, syncServerSavedRecipe],
   );
 
   const cancelGeneration = useCallback(() => {
@@ -969,6 +1043,7 @@ export default function App() {
       };
       const res = await savePromise;
       if (!isCurrentSave()) return;
+      syncServerSavedRecipe(res, recipe);
       if (res.warning) console.info(`[xBloom] 保存提示：${res.warning}`);
       setSavedAt(Date.now());
       setLocalRecipeId(res.id);
@@ -982,7 +1057,7 @@ export default function App() {
         setSaving(false);
       }
     }
-  }, [activeVariant, genMeta, originalRecipe, recipe, variant.improved]);
+  }, [activeVariant, genMeta, originalRecipe, recipe, syncServerSavedRecipe, variant.improved]);
 
   /** 采用改进版（任务 #62）：improved 载入主 recipe 状态，编辑器/保存/发布/BLE 全走现有链路 */
   const adoptImproved = useCallback(() => {
@@ -998,6 +1073,9 @@ export default function App() {
     setSavedAt(undefined); // 新方案未落库，恢复保存引导
     setLocalRecipeId(null);
     setCloudTableId(null); // 新方案与云端来源解绑，发布走新建
+    setPendingCloudPublish(null);
+    setCloudPublishRequestId(createRequestId());
+    setServerSaveWarning("");
   }, [replaceActiveRecipe, variant.improved]);
 
   /** 切回原版（任务 #62）：两份状态均保留，随时往返 */
@@ -1011,6 +1089,9 @@ export default function App() {
     setSavedAt(undefined);
     setLocalRecipeId(null);
     setCloudTableId(null);
+    setPendingCloudPublish(null);
+    setCloudPublishRequestId(createRequestId());
+    setServerSaveWarning("");
   }, [originalRecipe, originalClamped, originalBrewRationale, replaceActiveRecipe]);
 
   /** 保存两个方案（任务 #62）：先存原版（variant:"original"），成功后存改进版（name 附后缀、pairId=原版 id） */
@@ -1177,6 +1258,36 @@ export default function App() {
         activeVariantRef.current,
       );
       if (!savedVariant) return;
+      const savedPair = savedRecipePairState(
+        resOriginal,
+        originalRecipe,
+        resImproved,
+        improvedSnapshot.recipe,
+      );
+      setOriginalRecipe(savedPair.original.recipe);
+      if (savedPair.original.clamped) setOriginalClamped(savedPair.original.clamped);
+      setVariant((state) =>
+        state.improved
+          ? {
+              ...state,
+              improved: {
+                ...state.improved,
+                recipe: savedPair.improved.recipe,
+                ...(savedPair.improved.clamped ? { clamped: savedPair.improved.clamped } : {}),
+              },
+            }
+          : state,
+      );
+      const activeSaved = savedVariant === "improved" ? savedPair.improved : savedPair.original;
+      activeRecipeRef.current = activeSaved.recipe;
+      setRecipe(activeSaved.recipe);
+      if (activeSaved.clamped) setClamped(activeSaved.clamped);
+      setServerSaveWarning(
+        [savedPair.original.warning, savedPair.improved.warning].filter(Boolean).join("；") ||
+          (savedPair.original.clamped?.length || savedPair.improved.clamped?.length
+            ? "服务端保存时已将双方案中的越界参数钳位到安全区间。"
+            : ""),
+      );
       setSavedAt(Date.now());
       setLocalRecipeId(savedVariant === "improved" ? resImproved.id : resOriginal.id);
       setAutoSavedNote(
@@ -1215,6 +1326,9 @@ export default function App() {
       generatedPairSaveRef.current = null;
       generatedPairOriginalSaveRef.current = null;
       cloudBindRef.current = null;
+      setPendingCloudPublish(null);
+      setCloudPublishRequestId(createRequestId());
+      setServerSaveWarning("");
       setGenerating(false);
       setReasoning("");
       setContent("");
@@ -1287,15 +1401,14 @@ export default function App() {
         preceding.recipeRevision === recipeRevision
       ) {
         if (preceding.tableId === tableId) {
-          await preceding.promise;
-          return;
+          return Boolean(await preceding.promise);
         }
         try {
           priorRecipeId = (await preceding.promise) ?? priorRecipeId;
         } catch {
           // The new callback may retry after the failed predecessor below.
         }
-        if (!isCurrent()) return;
+        if (!isCurrent()) return false;
         const latest = cloudBindRef.current;
         if (latest === preceding) break;
         preceding = latest;
@@ -1388,6 +1501,7 @@ export default function App() {
           };
           const saved = await savePromise;
           if (!isCurrent()) return null;
+          syncServerSavedRecipe(saved, recipeSnapshot);
           recipeId = saved.id;
           setLocalRecipeId(recipeId);
           setSavedAt(Date.now());
@@ -1404,7 +1518,7 @@ export default function App() {
       })();
       cloudBindRef.current = { generationId, recipeRevision, tableId, promise: bindPromise };
       try {
-        await bindPromise;
+        return Boolean(await bindPromise);
       } catch (error) {
         if (cloudBindRef.current?.promise === bindPromise) cloudBindRef.current = null;
         throw error;
@@ -1415,7 +1529,15 @@ export default function App() {
         }
       }
     },
-    [activeVariant, genMeta, localRecipeId, originalRecipe, recipe, variant.improved],
+    [
+      activeVariant,
+      genMeta,
+      localRecipeId,
+      originalRecipe,
+      recipe,
+      syncServerSavedRecipe,
+      variant.improved,
+    ],
   );
 
   const deleteHistory = useCallback(async (id: string) => {
@@ -1744,6 +1866,7 @@ export default function App() {
                 onSave={() => void saveRecipe()}
                 saving={saving}
                 savedAt={savedAt}
+                saveWarning={serverSaveWarning}
               />
             )}
           </div>
@@ -1753,6 +1876,8 @@ export default function App() {
             <PublishPanel
               recipe={recipe}
               cloud={cloud}
+              cloudRegion={cloudRegion}
+              onCloudRegionChange={selectCloudRegion}
               onCloudChanged={refreshCloud}
               onOpenPreview={() => setPreviewOpen(true)}
               onOpenWorkspaceAccount={() => setAccountOpen(true)}
@@ -1797,7 +1922,13 @@ export default function App() {
         <ErrorBoundary key="cloud">
           <main className={`animate-fade-up ${mobileUi ? "pb-4" : ""}`}>
             <Suspense fallback={<PageLoading label="正在打开云端配方" />}>
-              <CloudPage cloud={cloud} onCloudChanged={refreshCloud} onImport={loadHistoryRecipe} />
+              <CloudPage
+                cloud={cloud}
+                cloudRegion={cloudRegion}
+                onCloudRegionChange={selectCloudRegion}
+                onCloudChanged={refreshCloud}
+                onImport={loadHistoryRecipe}
+              />
             </Suspense>
           </main>
         </ErrorBoundary>
@@ -1837,7 +1968,29 @@ export default function App() {
             cloud={cloud}
             onLoggedIn={refreshCloud}
             cloudTableId={cloudTableId ?? undefined}
-            onPublished={bindVerifiedCloudRecipe}
+            pendingCloudPublish={pendingCloudPublish ?? undefined}
+            cloudRegion={cloudRegion}
+            publishRequestId={cloudPublishRequestId}
+            onPendingPublished={(pending) => {
+              setPendingCloudPublish(pending);
+              setCloudPublishRequestId(createRequestId());
+            }}
+            onPublished={async (tableId) => {
+              // Capture the source fingerprint before binding can replace the active
+              // recipe with the server-normalized save response.
+              const publishedSourceRecipe = activeRecipeRef.current;
+              const bound = await bindVerifiedCloudRecipe(tableId);
+              if (bound) {
+                if (publishedSourceRecipe) {
+                  clearPersistentCloudPublishRequestId(publishedSourceRecipe, window.localStorage);
+                }
+                setCloudPublishRequestId(createRequestId());
+                setPendingCloudPublish((pending) =>
+                  pending?.tableId === tableId ? null : pending,
+                );
+              }
+              return bound;
+            }}
           />
         </Suspense>
       )}

@@ -127,6 +127,7 @@ export default function AppHeader({
                   key={tab.id}
                   type="button"
                   onClick={() => onTabChange(tab.id)}
+                  aria-current={active ? "page" : undefined}
                   className={`flex min-h-12 flex-col items-center justify-center gap-0.5 rounded-xl text-[10px] font-medium transition-colors ${
                     active
                       ? "bg-[var(--acc-soft)] text-[var(--acc)]"
@@ -177,7 +178,7 @@ export default function AppHeader({
           </h1>
         </div>
 
-        <nav className="min-w-0 flex-1 overflow-x-auto">
+        <nav aria-label="桌面端主导航" className="min-w-0 flex-1 overflow-x-auto">
           <div className="relative mx-auto flex w-fit items-center gap-0.5 rounded-lg border border-[var(--line)] bg-[var(--bg-inset)] p-0.5">
             {TABS.map((tab) => {
               const active = activeTab === tab.id;
@@ -189,6 +190,7 @@ export default function AppHeader({
                     tabButtonRefs.current[tab.id] = element;
                   }}
                   onClick={() => onTabChange(tab.id)}
+                  aria-current={active ? "page" : undefined}
                   className={`relative shrink-0 rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-150 ${
                     active
                       ? "bg-[var(--bg-card)] text-[var(--tx-1)] shadow-sm"

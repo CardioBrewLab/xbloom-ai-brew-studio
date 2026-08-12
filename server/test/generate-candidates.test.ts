@@ -94,7 +94,7 @@ const MID_RECIPE = {
   ],
 };
 
-/** 劣质候选：250ml 总水对 15g 粉 ratio 0.1 步进不可达 → 一票否决 */
+/** 不可达候选：安全层会对齐到最接近的云端可达总水。 */
 const BAD_RECIPE = {
   ...GOOD_RECIPE,
   grandWater: 250,
@@ -102,6 +102,14 @@ const BAD_RECIPE = {
     { volume: 110, temperature: 92, flowRate: 3.2, pattern: "center", pausing: 45 },
     { volume: 140, temperature: 90, flowRate: 3.2, pattern: "circular", pausing: 40 },
   ],
+};
+
+/** 特殊处理法仍以 95℃ 起步，触发不可自动忽略的规则否决。 */
+const VETO_RECIPE = {
+  ...GOOD_RECIPE,
+  grinderSize: 64,
+  rpm: 110,
+  pours: [{ ...GOOD_RECIPE.pours[0], temperature: 95 }, { ...GOOD_RECIPE.pours[1] }],
 };
 
 /** 双 warn 候选（任务 #113 postFix 测试）：闷蒸 10s + 非首段 vibAfter → 触发 auto-fix，
@@ -131,6 +139,12 @@ const BAD_RECIPE_ALT = {
   ...BAD_RECIPE,
   grinderSize: 62,
   rpm: 100,
+};
+
+const VETO_RECIPE_ALT = {
+  ...VETO_RECIPE,
+  grinderSize: 58,
+  rpm: 80,
 };
 
 describe("MAX 候选实质差异阈值", () => {
@@ -267,12 +281,12 @@ describe("多候选生成路由（任务 #106）", () => {
     assert.equal(scores.length, 3);
     const winnerIndex = picked.winner as number;
     const winnerScore = scores.find((s) => s.index === winnerIndex)!;
-    // 获胜者必须是全场最高分，且唯一否决候选（250ml 不可达）被否决
+    // 获胜者必须是全场最高分；原本不可达的 250ml 会先被安全层对齐。
     assert.equal(winnerScore.score, Math.max(...scores.map((s) => s.score)));
     assert.equal(winnerScore.vetoed, false);
     assert.ok(
-      scores.some((s) => s.vetoed),
-      "250ml 不可达候选应被一票否决",
+      scores.every((s) => !s.vetoed),
+      "自动对齐后的候选均可进入评分",
     );
 
     // 候选请求均为非流式；gpt 模型不下发 temperature、下发 seed
@@ -496,9 +510,17 @@ describe("多候选生成路由（任务 #106）", () => {
 
   it("任务 #113：全体候选被否决时 recipe warning 通道附加优选兜底警告", async () => {
     config.generateCandidates = 2;
-    await useMockLlm([{ content: fence(BAD_RECIPE) }, { content: fence(BAD_RECIPE_ALT) }]);
+    await useMockLlm([
+      { content: fence(VETO_RECIPE) },
+      { content: fence(VETO_RECIPE_ALT) },
+      { content: fence(VETO_RECIPE_ALT) },
+    ]);
 
-    const text = await postGenerate({ description: "冲一杯平衡的手冲咖啡" });
+    const text = await postGenerate({
+      description: "冲一杯平衡的手冲咖啡",
+      beans: "这是一支厌氧发酵豆",
+      research: false,
+    });
     const events = parseEvents(text);
     const picked = events.find((e) => e.type === "candidates" && e.stage === "picked")!;
     assert.ok(
@@ -577,15 +599,23 @@ describe("多候选生成路由（任务 #106）", () => {
 
   it("任务 #120：picked.results 否决候选携带 vetoReasons", async () => {
     config.generateCandidates = 2;
-    await useMockLlm([{ content: fence(GOOD_RECIPE) }, { content: fence(BAD_RECIPE) }]);
+    await useMockLlm([
+      { content: fence(GOOD_RECIPE) },
+      { content: fence(VETO_RECIPE) },
+      { content: fence(VETO_RECIPE_ALT) },
+    ]);
 
-    const text = await postGenerate({ description: "冲一杯平衡的手冲咖啡" });
+    const text = await postGenerate({
+      description: "冲一杯平衡的手冲咖啡",
+      beans: "这是一支厌氧发酵豆",
+      research: false,
+    });
     const events = parseEvents(text);
     const picked = events.find((e) => e.type === "candidates" && e.stage === "picked")!;
     const pickedResults = picked.results as Array<Record<string, unknown>>;
     assert.equal(pickedResults.length, 2);
     const vetoed = pickedResults.find((r) => r.vetoed === true) as { vetoReasons?: string[] };
-    assert.ok(vetoed, "250ml 不可达候选应被否决");
+    assert.ok(vetoed, "特殊处理法高温起步候选应被否决");
     assert.ok(
       Array.isArray(vetoed.vetoReasons) && vetoed.vetoReasons.length > 0,
       "否决候选携带非空 vetoReasons",
@@ -614,15 +644,7 @@ describe("多候选生成路由（任务 #106）", () => {
         note: string;
       }>;
     }>;
-    assert.equal(
-      okEntries.length,
-      3,
-      "GOOD/MID/BAD 结构均合法进入评分（BAD 被否决但 status 仍为 ok）",
-    );
-    assert.ok(
-      okEntries.some((e) => e.vetoed === true),
-      "250ml 不可达候选被一票否决",
-    );
+    assert.equal(okEntries.length, 3, "GOOD/MID/BAD 结构均合法进入评分");
     for (const entry of okEntries) {
       assert.ok(Array.isArray(entry.dimensions), "成功候选携带 dimensions 明细");
       assert.equal(entry.dimensions!.length, 7, "七个评分维度");

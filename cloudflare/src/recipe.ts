@@ -1,3 +1,9 @@
+import {
+  BYPASS_RATIO_RANGE,
+  CLOUD_LIMITS,
+  isReachableCloudTotal,
+} from "../../shared/src/recipe-schema.ts";
+
 export interface HostedPour {
   volume: number;
   temperature: number;
@@ -52,6 +58,87 @@ const number = (value: unknown, fallback: number): number =>
 const clamp = (value: number, min: number, max: number): number =>
   Math.min(max, Math.max(min, value));
 const round1 = (value: number): number => Math.round(value * 10) / 10;
+
+export function hostedRecipeCloudErrors(recipe: HostedRecipe): string[] {
+  const errors: string[] = [];
+  const check = (field: string, value: number, min: number, max: number): void => {
+    if (!Number.isFinite(value) || value < min || value > max) {
+      errors.push(`${field}=${value} 超出云端范围 [${min}, ${max}]`);
+    }
+  };
+
+  check("doseGrams", recipe.doseGrams, 1, 31);
+  check(
+    "grinderSize",
+    recipe.grinderSize,
+    CLOUD_LIMITS.grinderSize.min,
+    CLOUD_LIMITS.grinderSize.max,
+  );
+  if (!rpms.includes(recipe.rpm)) errors.push(`rpm=${recipe.rpm} 不是云端支持的档位`);
+  if (recipe.cupType !== "xdripper" && recipe.cupType !== "other") {
+    errors.push(`cupType=${recipe.cupType} 不是云端支持的滤杯类型`);
+  }
+  if (recipe.pours.length > 6) errors.push("注水段数量超过云端上限 6 段");
+  check(
+    "bypassVolume",
+    recipe.bypassVolume,
+    CLOUD_LIMITS.bypassVolume.min,
+    CLOUD_LIMITS.bypassVolume.max,
+  );
+  if (!Number.isInteger(recipe.bypassVolume)) errors.push("bypassVolume 必须为整数毫升");
+  check("bypassTemp", recipe.bypassTemp, CLOUD_LIMITS.bypassTemp.min, CLOUD_LIMITS.bypassTemp.max);
+  if (recipe.isSetGrinderSize !== 1 && recipe.isSetGrinderSize !== 2) {
+    errors.push(`isSetGrinderSize=${recipe.isSetGrinderSize} 不是云端支持的模式`);
+  }
+  if (!/^#[0-9a-f]{6}$/i.test(recipe.theColor)) errors.push("theColor 不是合法的 #RRGGBB 色值");
+  if (recipe.pours.length === 0) errors.push("配方至少需要一段注水");
+
+  let total = 0;
+  recipe.pours.forEach((pour, index) => {
+    check(`pours[${index}].volume`, pour.volume, 1, 300);
+    if (!Number.isInteger(pour.volume)) errors.push(`pours[${index}].volume 必须为整数毫升`);
+    check(
+      `pours[${index}].temperature`,
+      pour.temperature,
+      CLOUD_LIMITS.waterTemperature.min,
+      CLOUD_LIMITS.waterTemperature.max,
+    );
+    check(
+      `pours[${index}].flowRate`,
+      pour.flowRate,
+      CLOUD_LIMITS.flowRate.min,
+      CLOUD_LIMITS.flowRate.max,
+    );
+    check(
+      `pours[${index}].pausing`,
+      pour.pausing,
+      CLOUD_LIMITS.pausing.min,
+      CLOUD_LIMITS.pausing.max,
+    );
+    total += pour.volume;
+  });
+
+  if (Math.abs(total - recipe.grandWater) > 1e-9) {
+    errors.push(`分段总水量=${round1(total)} 不等于 grandWater=${recipe.grandWater}`);
+  }
+  if (recipe.doseGrams > 0 && !isReachableCloudTotal(recipe.doseGrams, recipe.grandWater)) {
+    errors.push(`云端粉水比不可达：${recipe.doseGrams}g/${recipe.grandWater}ml`);
+  }
+  if (recipe.doseGrams > 0) {
+    const effectiveWater = recipe.grandWater + (recipe.bypassEnabled ? recipe.bypassVolume : 0);
+    const ratio = round1(effectiveWater / recipe.doseGrams);
+    if (ratio < BYPASS_RATIO_RANGE.min || ratio > BYPASS_RATIO_RANGE.max) {
+      errors.push(
+        `最终粉水比=${ratio} 超出云端范围 [${BYPASS_RATIO_RANGE.min}, ${BYPASS_RATIO_RANGE.max}]`,
+      );
+    }
+  }
+  return errors;
+}
+
+export function isHostedRecipeCloudValid(recipe: HostedRecipe): boolean {
+  return hostedRecipeCloudErrors(recipe).length === 0;
+}
 
 export function extractJsonObject(text: string): unknown {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
@@ -151,6 +238,10 @@ export function normalizeRecipeWithReport(
     if (typeof rawPour?.vibAfter !== "boolean")
       clamps.push(`第 ${index + 1} 段后振动开关使用关闭状态`);
   });
+  const validationErrors = hostedRecipeCloudErrors(recipe);
+  if (validationErrors.length > 0) {
+    throw new Error(`配方不满足 xBloom 云端契约：${validationErrors.join("；")}`);
+  }
   return { recipe, clamps };
 }
 

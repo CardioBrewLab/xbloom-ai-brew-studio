@@ -119,8 +119,12 @@ export interface CloudStatus {
   passwordStored?: boolean;
   /** 当前登录账号邮箱（已登录时返回） */
   email?: string;
+  /** 当前 xBloom 账号标识；仅用于隔离本浏览器内的待确认发布。 */
+  memberId?: string;
   region?: "cn" | "global";
 }
+
+export type CloudRegion = "cn" | "global";
 
 export interface BleStatus {
   available: boolean;
@@ -336,6 +340,19 @@ export interface CloudPublishResult {
   adjustments?: string[];
   readback?: CloudReadback;
   verification: CloudWriteVerification;
+}
+
+export interface RecipeSaveResult {
+  ok: boolean;
+  id: string;
+  version?: number;
+  warning?: string;
+  /** 服务端校验并归一化后的配方；存在时前端应以此作为当前工作台快照。 */
+  recipe?: Recipe;
+  /** 兼容服务端以显式名称返回归一化配方的响应。 */
+  normalizedRecipe?: Recipe;
+  /** 服务端实际执行的参数钳位说明。 */
+  clamped?: string[];
 }
 
 /** 自动审查单条发现（任务 #36：与后端 lib/review.ts 契约一致） */
@@ -699,7 +716,7 @@ export const api = {
   // ---- 本地配方库 ----
   listRecipes: () => request<{ ok: boolean; recipes: SavedRecipe[] }>("/api/recipes"),
   saveRecipe: (recipe: Recipe, opts?: RecipeSaveOptions) =>
-    request<{ ok: boolean; id: string; version?: number; warning?: string }>("/api/recipes", {
+    request<RecipeSaveResult>("/api/recipes", {
       method: "POST",
       body: JSON.stringify({ recipe, ...opts }),
     }),
@@ -791,19 +808,31 @@ export const api = {
 
   // ---- 云端 ----
   cloudStatus: () => request<CloudStatus>("/api/cloud/status"),
-  cloudLogin: (email: string, password: string, region?: "cn" | "global") =>
-    request<{ ok: boolean; memberId: string; email: string }>("/api/cloud/login", {
+  cloudLogin: (email: string, password: string, region?: CloudRegion) =>
+    request<{ ok: boolean; memberId: string; email: string; region: CloudRegion }>(
+      "/api/cloud/login",
+      {
+        method: "POST",
+        body: JSON.stringify({ email, password, ...(region ? { region } : {}) }),
+      },
+    ),
+  cloudLogout: (region?: CloudRegion) =>
+    request<{ ok: boolean }>("/api/cloud/logout", {
       method: "POST",
-      body: JSON.stringify({ email, password, ...(region ? { region } : {}) }),
+      ...(region ? { body: JSON.stringify({ region }) } : {}),
     }),
-  cloudLogout: () => request<{ ok: boolean }>("/api/cloud/logout", { method: "POST" }),
-  cloudPublish: (recipe: Recipe, name?: string) =>
+  cloudPublish: (recipe: Recipe, name?: string, region?: CloudRegion, clientRequestId?: string) =>
     request<CloudPublishResult>("/api/cloud/publish", {
       method: "POST",
-      body: JSON.stringify({ recipe, name }),
+      body: JSON.stringify({
+        recipe,
+        name,
+        ...(region ? { region } : {}),
+        ...(clientRequestId ? { clientRequestId } : {}),
+      }),
     }),
   /** 发布前预演：返回对齐官方 ratio 0.1 步进后实际上传的总水量/分段与调整说明（任务 #39） */
-  cloudPublishPreview: (recipe: Recipe, name?: string) =>
+  cloudPublishPreview: (recipe: Recipe, name?: string, region?: CloudRegion) =>
     request<{
       ok: boolean;
       adjustments: string[];
@@ -814,28 +843,35 @@ export const api = {
       message?: string;
     }>("/api/cloud/publish-preview", {
       method: "POST",
-      body: JSON.stringify({ recipe, name }),
+      body: JSON.stringify({ recipe, name, ...(region ? { region } : {}) }),
     }),
-  cloudRecipes: () => request<{ ok: boolean; recipes: CloudRecipeEntry[] }>("/api/cloud/recipes"),
-  /** 拉取分享/云端配方全量详情（免登录），支持完整官方分享链接或 shareId */
-  cloudDetail: (shareId: string) =>
-    request<{ ok: boolean; recipe: Recipe; raw: Record<string, unknown> }>(
-      `/api/cloud/detail/${encodeURIComponent(shareId)}`,
+  cloudRecipes: (region?: CloudRegion) =>
+    request<{ ok: boolean; recipes: CloudRecipeEntry[] }>(
+      `/api/cloud/recipes${region ? `?region=${encodeURIComponent(region)}` : ""}`,
     ),
-  cloudUpdateRecipe: (tableId: string, patch: Record<string, unknown>) =>
+  /** 拉取分享/云端配方全量详情（免登录），支持完整官方分享链接或 shareId */
+  cloudDetail: (shareId: string, region?: CloudRegion) =>
+    request<{ ok: boolean; recipe: Recipe; raw: Record<string, unknown> }>(
+      `/api/cloud/detail/${encodeURIComponent(shareId)}${region ? `?region=${encodeURIComponent(region)}` : ""}`,
+    ),
+  cloudUpdateRecipe: (tableId: string, patch: Record<string, unknown>, region?: CloudRegion) =>
     request<CloudPublishResult>(`/api/cloud/recipes/${encodeURIComponent(tableId)}`, {
       method: "PUT",
-      body: JSON.stringify(patch),
+      body: JSON.stringify({ ...patch, ...(region ? { region } : {}) }),
     }),
-  cloudVerifyRecipe: (tableId: string) =>
+  cloudVerifyRecipe: (tableId: string, region?: CloudRegion) =>
     request<{
       ok: boolean;
       readback: CloudReadback;
       verification: CloudWriteVerification;
-    }>(`/api/cloud/verify/${encodeURIComponent(tableId)}`, { method: "POST" }),
-  cloudDeleteRecipe: (tableId: string) =>
+    }>(`/api/cloud/verify/${encodeURIComponent(tableId)}`, {
+      method: "POST",
+      ...(region ? { body: JSON.stringify({ region }) } : {}),
+    }),
+  cloudDeleteRecipe: (tableId: string, region?: CloudRegion) =>
     request<{ ok: boolean }>(`/api/cloud/recipes/${encodeURIComponent(tableId)}`, {
       method: "DELETE",
+      ...(region ? { body: JSON.stringify({ region }) } : {}),
     }),
 
   // ---- 小红书账号（任务 #83） ----

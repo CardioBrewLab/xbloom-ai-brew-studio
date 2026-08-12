@@ -5,8 +5,8 @@
  * - 已登录 → GET /api/cloud/recipes 列出云端账号配方，支持删除与导入本地编辑
  * - 品牌澄清：明确标注所连接的是 xBloom 官方云服务域名
  */
-import { useCallback, useEffect, useState } from "react";
-import { api, type CloudRecipeEntry, type CloudStatus } from "../lib/api.js";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, type CloudRecipeEntry, type CloudRegion, type CloudStatus } from "../lib/api.js";
 import type { Recipe } from "../lib/recipe-schema.js";
 import { cloudDetailReference } from "../lib/cloud-share.js";
 import {
@@ -23,6 +23,8 @@ import {
 
 export interface CloudPageProps {
   cloud: CloudStatus | null;
+  cloudRegion: CloudRegion;
+  onCloudRegionChange: (region: CloudRegion) => void;
   onCloudChanged: () => void;
   /** 导入到本地编辑（切换回工作台）；cloudTableId 记录来源供后续云端更新 */
   onImport: (recipe: Recipe, cloudTableId?: string) => void;
@@ -43,7 +45,13 @@ function cloudDomains(region: "cn" | "global"): { apiHost: string; shareHost: st
     : { apiHost: "client-api.xbloom.com", shareHost: "share-h5.xbloom.com" };
 }
 
-export default function CloudPage({ cloud, onCloudChanged, onImport }: CloudPageProps) {
+export default function CloudPage({
+  cloud,
+  cloudRegion,
+  onCloudRegionChange,
+  onCloudChanged,
+  onImport,
+}: CloudPageProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loggingIn, setLoggingIn] = useState(false);
@@ -51,38 +59,36 @@ export default function CloudPage({ cloud, onCloudChanged, onImport }: CloudPage
   const [listError, setListError] = useState("");
   const [busyId, setBusyId] = useState("");
   const [message, setMessage] = useState("");
-  // 云端区域：从后端 /api/config 读取；未取到时按当前实际运行环境默认 cn
-  const [cloudRegion, setCloudRegion] = useState<"cn" | "global">("cn");
-
+  const listRequestRef = useRef(0);
   const loggedIn = cloud?.loggedIn ?? false;
-
-  useEffect(() => {
-    api
-      .getConfig()
-      .then((cfg) => {
-        if (cfg.cloudRegion === "cn" || cfg.cloudRegion === "global")
-          setCloudRegion(cfg.cloudRegion);
-      })
-      .catch(() => {});
-  }, []);
+  const cloudAccountIdentity = cloud?.memberId ?? cloud?.email ?? "";
 
   const { apiHost, shareHost } = cloudDomains(cloudRegion);
 
   const refresh = useCallback(async () => {
+    const requestId = ++listRequestRef.current;
     setEntries(null);
     setListError("");
     try {
-      const res = await api.cloudRecipes();
+      const res = await api.cloudRecipes(cloudRegion);
+      if (requestId !== listRequestRef.current) return;
       setEntries(res.recipes ?? []);
     } catch (e) {
+      if (requestId !== listRequestRef.current) return;
       setEntries(null);
       setListError((e as Error).message);
     }
-  }, []);
+  }, [cloudRegion]);
 
   useEffect(() => {
-    if (loggedIn) void refresh();
-  }, [loggedIn, refresh]);
+    if (loggedIn) {
+      void refresh();
+    } else {
+      listRequestRef.current += 1;
+      setEntries(null);
+      setListError("");
+    }
+  }, [cloudAccountIdentity, loggedIn, refresh]);
 
   const login = async () => {
     if (!email.trim() || !password) return;
@@ -104,7 +110,7 @@ export default function CloudPage({ cloud, onCloudChanged, onImport }: CloudPage
     setBusyId(tableId);
     setMessage("");
     try {
-      await api.cloudDeleteRecipe(tableId);
+      await api.cloudDeleteRecipe(tableId, cloudRegion);
       setEntries((list) => (list ? list.filter((e) => e.tableId !== tableId) : list));
     } catch (e) {
       setMessage((e as Error).message);
@@ -119,7 +125,7 @@ export default function CloudPage({ cloud, onCloudChanged, onImport }: CloudPage
     setMessage("");
     try {
       const detailRef = cloudDetailReference(entry, cloudRegion);
-      const res = await api.cloudDetail(detailRef);
+      const res = await api.cloudDetail(detailRef, cloudRegion);
       onImport(res.recipe, String(entry.tableId));
     } catch (e) {
       setMessage(`导入失败：${(e as Error).message}`);
@@ -232,7 +238,7 @@ export default function CloudPage({ cloud, onCloudChanged, onImport }: CloudPage
                         <button
                           key={value}
                           type="button"
-                          onClick={() => setCloudRegion(value)}
+                          onClick={() => onCloudRegionChange(value)}
                           className={`rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
                             cloudRegion === value
                               ? "bg-[var(--bg-card)] text-[var(--tx-1)] shadow-sm"
@@ -320,7 +326,7 @@ export default function CloudPage({ cloud, onCloudChanged, onImport }: CloudPage
                   type="button"
                   onClick={() => {
                     void api
-                      .cloudLogout()
+                      .cloudLogout(cloudRegion)
                       .then(onCloudChanged)
                       .catch(() => onCloudChanged());
                   }}

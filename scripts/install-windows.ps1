@@ -3,7 +3,8 @@
 param(
     [switch]$SkipLaunch,
     [switch]$SkipShortcut,
-    [switch]$SkipBle
+    [switch]$SkipBle,
+    [switch]$SkipXhs
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,6 +19,11 @@ $NodeArchiveName = "node-v$NodeVersion-win-x64.zip"
 $NodeArchiveUrl = "https://nodejs.org/dist/v$NodeVersion/$NodeArchiveName"
 $ExpectedNodeSha256 = '0AE68406B42D7725661DA979B1403EC9926DA205C6770827F33AAC9D8F26E821'
 . (Join-Path $PSScriptRoot 'windows-compat.ps1')
+
+$ProjectDriveFormat = Get-XbloomDriveFormat $Root
+if ($ProjectDriveFormat -notin @('NTFS', 'ReFS')) {
+    Write-Warning ("SECURITY WARNING: the project volume is " + $ProjectDriveFormat + " and has no reliable per-user Windows ACLs. Keep this directory private to the current Windows account; .env, data, cookies and deployment state may be readable by other accounts.")
+}
 
 function Assert-ProjectPath([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
@@ -108,6 +114,23 @@ function New-DesktopShortcut {
     Write-Host "Desktop shortcut created: $shortcutPath"
 }
 
+function Protect-InstallPrivateState {
+    foreach ($entry in @(
+        @{ Path = (Join-Path $Root '.env'); Directory = $false },
+        @{ Path = (Join-Path $Root 'data'); Directory = $true },
+        @{ Path = (Join-Path $Root 'tools\xhs-mcp\runtime'); Directory = $true },
+        @{ Path = (Join-Path $Root 'cloudflare\.wrangler\edge-proxy-secret.txt'); Directory = $false }
+    )) {
+        if (-not (Test-Path -LiteralPath $entry.Path)) { continue }
+        Assert-NoProjectReparsePoint $entry.Path | Out-Null
+        if ($entry.Directory) {
+            [void](Protect-XbloomPrivateDirectory -Path $entry.Path -DriveFormat $ProjectDriveFormat)
+        } else {
+            [void](Protect-XbloomPrivatePath -Path $entry.Path -DriveFormat $ProjectDriveFormat)
+        }
+    }
+}
+
 Write-Host ''
 Write-Host 'xBloom AI Brew Studio - local Windows setup' -ForegroundColor Cyan
 Write-Host "Project: $Root"
@@ -136,6 +159,8 @@ if (-not (Test-Path -LiteralPath $envFile)) {
     Copy-Item -LiteralPath (Join-Path $Root '.env.example') -Destination $envFile
     Write-Host 'Created a blank local .env file. Model credentials remain user supplied.'
 }
+New-Item -ItemType Directory -Path (Join-Path $Root 'data') -Force | Out-Null
+Protect-InstallPrivateState
 
 Push-Location $Root
 try {
@@ -160,7 +185,14 @@ try {
     Pop-Location
 }
 
-& (Join-Path $Root 'tools\xhs-mcp\install-xhs-mcp.ps1')
+if ($SkipXhs) {
+    Write-Warning 'Optional Xiaohongshu MCP setup skipped by request.'
+} else {
+    [void](Invoke-XbloomOptionalStep -Name 'Xiaohongshu MCP helper' -Action {
+        $powershell = Join-Path $PSHOME 'powershell.exe'
+        & $powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'tools\xhs-mcp\install-xhs-mcp.ps1')
+    })
+}
 
 # The everyday workflow uploads to the phone App. When Python is already
 # available, prepare the optional Windows BLE device lab as part of setup.
@@ -178,7 +210,14 @@ if ($SkipBle) {
 }
 
 New-Item -ItemType Directory -Path (Join-Path $Root 'data') -Force | Out-Null
-if (-not $SkipShortcut) { New-DesktopShortcut }
+if (-not $SkipShortcut) {
+    [void](Invoke-XbloomOptionalStep -Name 'desktop shortcut' -Action {
+        New-DesktopShortcut
+    })
+} else {
+    Write-Host 'Optional desktop shortcut setup skipped by request.'
+}
+Protect-InstallPrivateState
 
 Write-Host ''
 Write-Host 'Installation completed.' -ForegroundColor Green

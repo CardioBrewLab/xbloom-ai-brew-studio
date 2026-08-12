@@ -49,6 +49,20 @@ export function normalizeRecipeSaveRequestId(value: unknown): string | undefined
     : undefined;
 }
 
+/** Build the normalized payload returned for an idempotent save retry. */
+export function existingRecipeSaveResponse(existing: StoredRecipe, requestedRecipe: unknown) {
+  const retriedNormalization = clampRecipe(requestedRecipe);
+  const warning = durationWarning(existing.recipe);
+  return {
+    ok: true as const,
+    id: existing.id,
+    recipe: existing.recipe,
+    clamped: retriedNormalization.clamped,
+    ...(existing.version ? { version: existing.version } : {}),
+    ...(warning ? { warning } : {}),
+  };
+}
+
 /** 冲煮反馈味型枚举（generate 重生成调参分支的输入）：五味型 + 三枚风味维度标签 */
 export { MAX_FEEDBACKS_PER_RECIPE, TASTE_TAGS };
 export type TasteTag = (typeof TASTE_TAGS)[number];
@@ -212,17 +226,11 @@ recipesRouter.post("/api/recipes", (req: Request, res: Response) => {
       ) {
         saveAll(list);
       }
-      const warning = durationWarning(existing.recipe);
-      res.json({
-        ok: true,
-        id: existing.id,
-        ...(existing.version ? { version: existing.version } : {}),
-        ...(warning ? { warning } : {}),
-      });
+      res.json(existingRecipeSaveResponse(existing, body.recipe));
       return;
     }
     // 入库前统一钳位到 SAFE_LIMITS，保证库中配方永远合法
-    const { recipe } = clampRecipe(body.recipe);
+    const { recipe, clamped } = clampRecipe(body.recipe);
     if (body.name && typeof body.name === "string" && body.name.trim()) {
       recipe.name = body.name.trim();
     }
@@ -329,6 +337,8 @@ recipesRouter.post("/api/recipes", (req: Request, res: Response) => {
     res.json({
       ok: true,
       id: entry.id,
+      recipe,
+      clamped,
       ...(entry.version ? { version: entry.version } : {}),
       ...(warning ? { warning } : {}),
     });

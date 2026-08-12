@@ -78,7 +78,7 @@ Kimi、DeepSeek 和 Qwen 使用 OpenAI-compatible 协议。Hosted Worker 调用�
    .\install-windows.bat
    ```
 
-   安装器会准备项目内的 Node.js 运行时，安装锁定依赖，构建各工作区，在需要时创建空白本地 `.env`，安装可选的小红书助手；如果电脑已经有 Python，也会尝试准备可选 BLE 环境。
+   安装器会准备项目内的 Node.js 运行时，安装锁定依赖，构建各工作区，在需要时创建空白本地 `.env`，尝试安装可选的小红书助手；如果电脑已经有 Python，也会尝试准备可选 BLE 环境。小红书助手或桌面快捷方式失败时，核心应用安装仍会继续。
 
 3. 安装完成后会启动应用。如果浏览器没有自动打开，可以使用桌面快捷方式或运行：
 
@@ -88,7 +88,7 @@ Kimi、DeepSeek 和 Qwen 使用 OpenAI-compatible 协议。Hosted Worker 调用�
 
 4. 本地浏览器界面默认地址是 `http://localhost:5180`，API 默认监听 `127.0.0.1:8787`。小红书助手第一次启动时可能还会下载浏览器运行时。停止本地服务请运行 `stop-xbloom.bat`。
 
-安装器针对 exFAT/FAT 提供物理依赖布局，不依赖 Windows 工作区链接；升级时仍建议把发布目录放在本机可写的 NTFS 卷上。重复运行安装器会刷新受管理的运行时、依赖并重新构建应用；清理文件时请保留用户自己的数据和 `.env`。
+安装器针对 exFAT/FAT 提供物理依赖布局，不依赖 Windows 工作区链接；这类卷没有可靠的 Windows 按用户 ACL，安装器会显示醒目的隐私警告，请把包含 `.env`、`data/`、Cookie 和部署状态的目录保持为当前用户私有。NTFS/ReFS 上安装器会收紧这些本地状态路径的 ACL。升级时仍建议把发布目录放在本机可写的 NTFS 卷上。重复运行安装器会刷新受管理的运行时、依赖并重新构建应用；清理文件时请保留用户自己的数据和 `.env`。
 
 ### 配置 Windows 本地版
 
@@ -98,7 +98,7 @@ Kimi、DeepSeek 和 Qwen 使用 OpenAI-compatible 协议。Hosted Worker 调用�
 4. 需要小红书调研时，启动本地助手并从页面完成配对。助手的登录状态保存在本机运行时目录中。
 5. 只有在使用兼容的 Windows/Python 设备流程时才运行 BLE 设置；它和 xBloom App 云端上传是两条独立流程。
 
-本地服务端默认绑定回环地址。`data/`、`.env`、`.runtime/` 和助手运行时目录都属于当前 Windows 用户的本地数据，请从其他人的电脑或发布压缩包中重新配置，不要直接复制会话状态。
+本地服务端默认绑定回环地址。`data/`、`.env`、`.runtime/` 和助手运行时目录都属于当前 Windows 用户的本地数据，请从其他人的电脑或发布压缩包中重新配置，不要直接复制会话状态。若需跳过可选组件，可运行 `.\scripts\install-windows.ps1 -SkipXhs -SkipShortcut -SkipLaunch`。
 
 ## 开发和验证
 

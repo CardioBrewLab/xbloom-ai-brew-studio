@@ -92,6 +92,8 @@ export interface RecipeEditorProps {
   onSave: () => void;
   saving: boolean;
   savedAt?: number;
+  /** 服务端保存后返回的参数钳位/归一化提示。 */
+  saveWarning?: string;
 }
 
 export default function RecipeEditor({
@@ -100,6 +102,7 @@ export default function RecipeEditor({
   onSave,
   saving,
   savedAt,
+  saveWarning,
 }: RecipeEditorProps) {
   const [draft, setDraft] = useState<Recipe>(recipe);
   /** 最近一次与父级同步（上抛或接收）的配方引用：用于区分"父级回显"与"外部新配方" */
@@ -181,6 +184,16 @@ export default function RecipeEditor({
           </button>
         }
       />
+      {saveWarning && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mx-5 mt-4 rounded-lg border border-[var(--acc-line)] bg-[var(--acc-soft)] px-3 py-2 text-[11px] leading-relaxed text-[var(--tx-2)]"
+        >
+          <span className="font-medium text-[var(--acc)]">保存后已应用服务端参数修正：</span>
+          {saveWarning}
+        </div>
+      )}
       {/* 总时长超 3:00 警告（任务 #35）：仅提示不拦截 */}
       {curve.totalDuration > 180 && (
         <div className="mx-5 mt-4 rounded-lg border border-[var(--acc-line)] bg-[var(--acc-soft)] px-3 py-2 text-[11px] leading-relaxed text-[var(--tx-2)]">

@@ -79,6 +79,54 @@ describe("前端边界修复", () => {
     assert.match(settings, /thirdModel: ""/);
   });
 
+  it("desktop and mobile navigation expose the current page", () => {
+    const header = source("AppHeader.tsx");
+    assert.match(header, /aria-label="桌面端主导航"/);
+    assert.equal((header.match(/aria-current=\{active \? "page" : undefined\}/g) ?? []).length, 2);
+  });
+
+  it("cloud region reaches preview APIs and pending writes reuse the update path", () => {
+    const modal = source("PublishPreviewModal.tsx");
+    const api = readFileSync(new URL("../src/lib/api.ts", import.meta.url), "utf8");
+    const app = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+    assert.match(modal, /cloudPublishPreview\(previewSrc, undefined, selectedCloudRegion\)/);
+    assert.match(modal, /pendingPublishForAccount\(/);
+    assert.match(modal, /activePendingCloudPublish \?\? recoveredPendingCloudPublish/);
+    assert.match(modal, /onPendingPublished\?\.\(\{/);
+    assert.doesNotMatch(app, /pendingCloudPublish\.recipeKey === JSON\.stringify\(recipe\)/);
+    assert.equal((modal.match(/recipeKey: JSON\.stringify\(recipe\)/g) ?? []).length, 3);
+    assert.equal((modal.match(/accountKey: currentCloudAccountKey/g) ?? []).length, 2);
+    assert.doesNotMatch(modal, /recipeKey: JSON\.stringify\(draft\)/);
+    assert.match(api, /cloudPublish:[\s\S]*clientRequestId\?: string/);
+    assert.match(modal, /cloudPublish\(\s*checkpoint\.recipe,[\s\S]*checkpoint\.requestId/);
+    assert.match(modal, /prepareCloudPublishRequest\(/);
+    assert.match(modal, /markCloudPublishRequestCreated\(/);
+    assert.equal((modal.match(/clearCloudPublishRequestCheckpoint\(/g) ?? []).length, 3);
+    assert.match(
+      modal,
+      /\[cloud\?\.region, cloudRegionProp, currentCloudAccountKey, open, recipe\]/,
+    );
+    assert.match(app, /publishRequestId=\{cloudPublishRequestId\}/);
+    const sourceCapture = app.indexOf("const publishedSourceRecipe = activeRecipeRef.current");
+    const cloudBind = app.indexOf("await bindVerifiedCloudRecipe(tableId)", sourceCapture);
+    assert.ok(sourceCapture > 0 && cloudBind > sourceCapture);
+    assert.match(
+      app.slice(cloudBind),
+      /clearPersistentCloudPublishRequestId\(\s*publishedSourceRecipe/,
+    );
+    const generateStart = app.indexOf("const generate = useCallback");
+    const recipeEvent = app.indexOf('case "recipe":', generateStart);
+    const pendingClear = app.indexOf("setPendingCloudPublish(null)", generateStart);
+    assert.ok(recipeEvent > generateStart && pendingClear > recipeEvent);
+    assert.match(api, /cloudRecipes: \(region\?: CloudRegion\)/);
+    const cloudPage = readFileSync(new URL("../src/pages/CloudPage.tsx", import.meta.url), "utf8");
+    assert.match(cloudPage, /\[cloudAccountIdentity, loggedIn, refresh\]/);
+    const publishPanel = source("PublishPanel.tsx");
+    assert.match(publishPanel, /cloudLogin\(email\.trim\(\), password, cloudRegion\)/);
+    assert.match(publishPanel, /aria-label="xBloom 账号区域"/);
+    assert.match(app, /saveWarning=\{serverSaveWarning\}/);
+  });
+
   it("冲煮结束态区分机器注水、旁路补水与最终总水量", () => {
     const guide = source("BrewGuide.tsx");
     assert.match(guide, /冲煮结束后加入/);

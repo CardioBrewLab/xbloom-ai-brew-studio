@@ -4,7 +4,7 @@
 
 1. 再双击一次 `start-xbloom.bat`；守护程序有单实例保护。
 2. 手动打开 `http://localhost:5180`。
-3. 查看 `data/xbloom-watchdog.log`、`data/xbloom-backend.log` 与 `data/xbloom-frontend.log`。
+3. 查看 `data/xbloom-watchdog.log`、`data/xbloom-backend.log`、`data/xbloom-backend-error.log`、`data/xbloom-frontend.log` 与 `data/xbloom-frontend-error.log`。
 4. 运行 `stop-xbloom.bat` 后重新启动，释放由本项目拥有的 8787/5180 进程。
 
 若端口已被其他软件占用，可在 `.env` 调整后重启：
@@ -13,6 +13,12 @@
 PORT=18787
 WEB_PORT=15180
 ```
+
+watchdog 会把 API 目标同步到 Vite 的 `VITE_API_PROXY_TARGET`。如果该变量被手动设置，必须使用绝对 HTTP/HTTPS 地址，不能带凭据、查询参数或片段；非法值会在 Vite 启动前给出错误。
+
+小红书助手和桌面快捷方式属于可选步骤。助手下载、校验、杀毒软件或桌面权限失败时，安装器会保留核心应用并显示警告；也可以显式运行 `.\scripts\install-windows.ps1 -SkipXhs -SkipShortcut -SkipLaunch`。
+
+若 `.env` 中的 `SEARXNG_URL` 或 `XHS_MCP_URL` 指向远端或其他本机端口，watchdog 会跳过固定 8899/18060 的本地自愈，避免启动无关的 Docker 或助手进程。
 
 ## 模型连接测试失败
 

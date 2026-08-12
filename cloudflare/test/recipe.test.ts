@@ -6,6 +6,8 @@ import {
   hostedRecipeFingerprint,
   hostedRecipesAreDistinct,
   hostedRecipeSummary,
+  hostedRecipeCloudErrors,
+  isHostedRecipeCloudValid,
   normalizeRecipe,
   normalizeRecipeWithReport,
   scoreHostedRecipe,
@@ -14,7 +16,7 @@ import {
 
 test("normalizes a fenced model recipe into xBloom-safe ranges", () => {
   const raw = extractJsonObject(
-    '```json\n{"name":"Test","doseGrams":99,"grinderSize":10,"rpm":83,"pours":[{"volume":45,"temperature":99,"flowRate":9,"pattern":"bad","pausing":20}]}\n```',
+    '```json\n{"name":"Test","doseGrams":99,"grinderSize":10,"rpm":83,"pours":[{"volume":234,"temperature":99,"flowRate":9,"pattern":"bad","pausing":20}]}\n```',
   );
   const recipe = normalizeRecipe(raw);
   assert.equal(recipe.doseGrams, 18);
@@ -23,7 +25,7 @@ test("normalizes a fenced model recipe into xBloom-safe ranges", () => {
   assert.equal(recipe.pours[0].temperature, 95);
   assert.equal(recipe.pours[0].flowRate, 3.5);
   assert.equal(recipe.pours[0].pattern, "center");
-  assert.equal(recipe.grandWater, 45);
+  assert.equal(recipe.grandWater, 234);
   assert.ok(normalizeRecipeWithReport(raw).clamps.length >= 5);
 });
 
@@ -65,7 +67,7 @@ test("scores a normal three-pour recipe above an extreme ratio", () => {
     pours: [
       { volume: 45, temperature: 92, flowRate: 3.2, pattern: "center", pausing: 35 },
       { volume: 95 },
-      { volume: 95 },
+      { volume: 94 },
     ],
   });
   const extreme = normalizeRecipe({
@@ -73,7 +75,7 @@ test("scores a normal three-pour recipe above an extreme ratio", () => {
     doseGrams: 18,
     grinderSize: 72,
     rpm: 80,
-    pours: [{ volume: 40, pausing: 10 }],
+    pours: [{ volume: 216, pausing: 10 }],
   });
   assert.ok(scoreRecipe(normal) > scoreRecipe(extreme));
   const report = scoreHostedRecipe(normal);
@@ -90,14 +92,14 @@ test("fingerprint ignores display name but catches executable parameter differen
     doseGrams: 15,
     grinderSize: 60,
     rpm: 90,
-    pours: [{ volume: 45, temperature: 92, flowRate: 3.2, pattern: "center", pausing: 35 }],
+    pours: [{ volume: 240, temperature: 92, flowRate: 3.2, pattern: "center", pausing: 35 }],
   });
   assert.equal(hostedRecipeFingerprint(base), hostedRecipeFingerprint({ ...base, name: "B" }));
   assert.notEqual(
     hostedRecipeFingerprint(base),
     hostedRecipeFingerprint({ ...base, grinderSize: 61 }),
   );
-  assert.equal(hostedRecipeSummary(base).ratio, 3);
+  assert.equal(hostedRecipeSummary(base).ratio, 16);
 });
 
 test("requires two material executable changes before a MAX candidate is distinct", () => {
@@ -151,4 +153,27 @@ test("summary ratio includes bypass and exposes every diversity parameter", () =
   assert.equal(summary.bypassVolume, 15);
   assert.equal(summary.isSetGrinderSize, 2);
   assert.equal(summary.pours[0].vibBefore, true);
+});
+
+test("hosted cloud validation helper rejects an unreachable or inconsistent candidate", () => {
+  const valid = normalizeRecipe({
+    name: "Valid",
+    doseGrams: 15,
+    grinderSize: 72,
+    rpm: 80,
+    pours: [{ volume: 240, temperature: 92, flowRate: 3.2, pattern: "center", pausing: 35 }],
+  });
+  assert.equal(isHostedRecipeCloudValid(valid), true);
+  const invalid = {
+    ...valid,
+    grandWater: 226,
+    pours: [{ ...valid.pours[0], volume: 226 }],
+  };
+  assert.equal(isHostedRecipeCloudValid(invalid), false);
+  assert.ok(hostedRecipeCloudErrors(invalid).some((message) => message.includes("不可达")));
+  assert.ok(
+    hostedRecipeCloudErrors({ ...valid, grandWater: 225 }).some((message) =>
+      message.includes("不等于"),
+    ),
+  );
 });

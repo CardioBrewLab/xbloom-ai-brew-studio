@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { after, beforeEach, describe, test } from "node:test";
 import edgeOneHandler, { onRequest } from "../cloud-functions/api/[[default]].js";
 
@@ -19,6 +20,22 @@ after(() => {
 });
 
 describe("EdgeOne 中国入口 API Relay", () => {
+  test("部署配置使用平台预装 Node，并给流式 API 配置完整函数时限与安全响应头", async () => {
+    const config = JSON.parse(await readFile(new URL("../edgeone.json", import.meta.url), "utf8"));
+    assert.equal(config.nodeVersion, "22.11.0");
+    assert.equal(config.cloudFunctions?.nodejs?.maxDuration, 120);
+
+    const globalHeaders = Object.fromEntries(
+      config.headers
+        .find((rule) => rule.source === "/*")
+        .headers.map(({ key, value }) => [key.toLowerCase(), value]),
+    );
+    assert.equal(globalHeaders["x-frame-options"], "DENY");
+    assert.equal(globalHeaders["strict-transport-security"], "max-age=31536000");
+    assert.match(globalHeaders["content-security-policy"], /frame-ancestors 'none'/);
+    assert.match(globalHeaders["content-security-policy"], /connect-src 'self'/);
+  });
+
   test("默认导出与可测试的命名处理器保持一致", () => {
     assert.equal(edgeOneHandler, onRequest);
   });
@@ -137,6 +154,28 @@ describe("EdgeOne 中国入口 API Relay", () => {
       });
       assert.equal(response.status, 204);
     }
+  });
+
+  test("客户端取消会传递到 Cloudflare 上游请求", async () => {
+    let capturedSignal;
+    globalThis.fetch = async (_target, init) => {
+      capturedSignal = init.signal;
+      return new Response(null, { status: 204 });
+    };
+    const controller = new AbortController();
+    const response = await onRequest({
+      request: edgeRequest("https://brew.example.cn/api/status", {
+        signal: controller.signal,
+      }),
+      env: {
+        CLOUDFLARE_WORKER_ORIGIN: "https://worker.example/",
+        EDGE_PROXY_SECRET: "e".repeat(32),
+      },
+    });
+    assert.equal(response.status, 204);
+    assert.equal(capturedSignal.aborted, false);
+    controller.abort(new Error("client left"));
+    assert.equal(capturedSignal.aborted, true);
   });
 
   test("上游网络异常返回稳定的 JSON 502，而不是平台运行时错误", async () => {

@@ -52,7 +52,7 @@ describe("clampRecipe 钳位", () => {
     assert.equal(clampRecipe(low).recipe.pours[0].flowRate, 3.0);
   });
 
-  it("总水超过 500ml 时各段等比缩放并保持一致性", () => {
+  it("总水超过云端粉水比上限时缩放到云端可达总水", () => {
     const input = makeValidRecipe();
     input.pours = [
       { volume: 300, temperature: 90, flowRate: 3.2, pattern: "center", pausing: 10 },
@@ -60,12 +60,13 @@ describe("clampRecipe 钳位", () => {
     ];
     input.grandWater = 600;
     const { recipe } = clampRecipe(input);
-    assert.equal(recipe.grandWater, 500);
+    assert.equal(recipe.grandWater, 300);
     const sum = recipe.pours.reduce((s, p) => s + p.volume, 0);
     assert.ok(Math.abs(sum - recipe.grandWater) < 1e-6);
+    assert.deepEqual(validateForTarget(recipe, "cloud"), []);
   });
 
-  it("评审反例 [37,1,1]：向上缩放到最小总水 40，差额吸收后 sum 精确贴合", () => {
+  it("评审反例 [37,1,1]：向上缩放到云端最低可达总水", () => {
     const input = makeValidRecipe();
     input.grandWater = 39;
     input.pours = [
@@ -74,16 +75,17 @@ describe("clampRecipe 钳位", () => {
       { volume: 1, temperature: 90, flowRate: 3.2, pattern: "center", pausing: 0 },
     ];
     const { recipe } = clampRecipe(input);
-    assert.equal(recipe.grandWater, 40);
+    assert.equal(recipe.grandWater, 180);
     const sum = recipe.pours.reduce((s, p) => s + p.volume, 0);
-    assert.ok(Math.abs(sum - 40) < 1e-6, `sum=${sum} 应精确等于 40`);
+    assert.ok(Math.abs(sum - 180) < 1e-6, `sum=${sum} 应精确等于 180`);
     assert.ok(
       recipe.grandWater >= SAFE_LIMITS.totalWater.min &&
         recipe.grandWater <= SAFE_LIMITS.totalWater.max,
     );
+    assert.deepEqual(validateForTarget(recipe, "cloud"), []);
   });
 
-  it("评审反例 [300,300,1,1,1,1]：向下缩放到最大总水 500，差额吸收后 sum 精确贴合", () => {
+  it("评审反例 [300,300,1,1,1,1]：向下缩放到云端最高可达总水", () => {
     const input = makeValidRecipe();
     input.grandWater = 604;
     input.pours = [
@@ -95,13 +97,14 @@ describe("clampRecipe 钳位", () => {
       { volume: 1, temperature: 90, flowRate: 3.2, pattern: "center", pausing: 0 },
     ];
     const { recipe } = clampRecipe(input);
-    assert.equal(recipe.grandWater, 500);
+    assert.equal(recipe.grandWater, 300);
     const sum = recipe.pours.reduce((s, p) => s + p.volume, 0);
-    assert.ok(Math.abs(sum - 500) < 1e-6, `sum=${sum} 应精确等于 500`);
+    assert.ok(Math.abs(sum - 300) < 1e-6, `sum=${sum} 应精确等于 300`);
     assert.ok(
       recipe.grandWater >= SAFE_LIMITS.totalWater.min &&
         recipe.grandWater <= SAFE_LIMITS.totalWater.max,
     );
+    assert.deepEqual(validateForTarget(recipe, "cloud"), []);
   });
 
   it("钳位结果始终通过 RecipeSchema 且落在 SAFE_LIMITS 内", () => {

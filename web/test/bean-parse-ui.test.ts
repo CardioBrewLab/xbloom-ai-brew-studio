@@ -15,6 +15,7 @@ import {
   mapParsedToBeanFields,
   mergeParsedDraft,
   missingCoreFields,
+  parseRequestIsCurrent,
   PARSED_FIELD_META,
   parsedFieldToText,
   type BeanParseState,
@@ -48,6 +49,13 @@ const PARSED_EMPTY: ParsedBeanInfo = {
   altitude: null,
   notes: null,
 };
+
+describe("bean parse request identity", () => {
+  it("ignores a response from an earlier request after the source text changes", () => {
+    assert.equal(parseRequestIsCurrent(7, 8), false);
+    assert.equal(parseRequestIsCurrent(8, 8), true);
+  });
+});
 
 describe("解析状态机 beanParseTransition（任务 #118）", () => {
   it("合法转移链：idle→loading→done→applied 与 loading→error", () => {

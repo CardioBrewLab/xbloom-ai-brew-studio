@@ -3,6 +3,7 @@
 param(
     [ValidatePattern('^$|^https://')][string]$LlmBaseUrl = '',
     [ValidateLength(0,200)][string]$LlmModel = '',
+    [ValidatePattern('^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')]
     [string]$WorkerName = 'xbloom-ai-brew-studio',
     [ValidateSet('free','scale')][string]$XhsBrowserProfile = 'free',
     [switch]$SkipDeploy,
@@ -16,12 +17,21 @@ $Config = Join-Path $PSScriptRoot 'wrangler.generated.jsonc'
 $Template = Join-Path $PSScriptRoot 'wrangler.template.jsonc'
 $DatabaseName = ($WorkerName + '-db')
 $EdgeSecretFile = Join-Path $PSScriptRoot '.wrangler\edge-proxy-secret.txt'
+. (Join-Path $Root 'scripts\windows-compat.ps1')
 
 if ([bool]$LlmBaseUrl -xor [bool]$LlmModel) {
     throw 'LlmBaseUrl and LlmModel must be provided together.'
 }
 if ($ConfigureSharedGuestModel -and (-not $LlmBaseUrl -or -not $LlmModel)) {
     throw 'ConfigureSharedGuestModel requires LlmBaseUrl and LlmModel.'
+}
+if ($LlmBaseUrl) {
+    $parsedLlmBaseUrl = $null
+    if (-not [Uri]::TryCreate($LlmBaseUrl, [UriKind]::Absolute, [ref]$parsedLlmBaseUrl) -or
+        $parsedLlmBaseUrl.Scheme -ne 'https' -or -not $parsedLlmBaseUrl.Host -or
+        $parsedLlmBaseUrl.UserInfo -or $parsedLlmBaseUrl.Query -or $parsedLlmBaseUrl.Fragment) {
+        throw 'LlmBaseUrl must be an HTTPS API URL without credentials, query parameters or fragments.'
+    }
 }
 
 function Invoke-Npx([string[]]$Arguments) {
@@ -54,6 +64,16 @@ function Set-XhsBrowserProfile([string]$ConfigText) {
     return $ConfigText.Replace('"XHS_BROWSER_PROFILE": "free"', '"XHS_BROWSER_PROFILE": "' + $profileValues.Profile + '"').Replace('"XHS_BROWSER_QR_DAILY_LIMIT": "3"', '"XHS_BROWSER_QR_DAILY_LIMIT": "' + $profileValues.Qr + '"').Replace('"XHS_BROWSER_SEARCH_DAILY_LIMIT": "20"', '"XHS_BROWSER_SEARCH_DAILY_LIMIT": "' + $profileValues.Search + '"').Replace('"XHS_BROWSER_QR_OWNER_DAILY_LIMIT": "3"', '"XHS_BROWSER_QR_OWNER_DAILY_LIMIT": "' + $profileValues.OwnerQr + '"').Replace('"XHS_BROWSER_SEARCH_OWNER_DAILY_LIMIT": "10"', '"XHS_BROWSER_SEARCH_OWNER_DAILY_LIMIT": "' + $profileValues.OwnerSearch + '"')
 }
 
+function ConvertTo-JsonString([string]$Value) {
+    return (ConvertTo-Json -InputObject $Value -Compress)
+}
+
+function New-WranglerConfigText([string]$TemplateText, [string]$DatabaseId = '00000000-0000-0000-0000-000000000000') {
+    # Replace complete JSON string literals rather than raw substrings. This keeps
+    # user-supplied model IDs valid JSON and prevents a worker name changing other fields.
+    return $TemplateText.Replace('"xbloom-ai-brew-studio-db"', (ConvertTo-JsonString $DatabaseName)).Replace('"xbloom-ai-brew-studio"', (ConvertTo-JsonString $WorkerName)).Replace('"00000000-0000-0000-0000-000000000000"', (ConvertTo-JsonString $DatabaseId)).Replace('"https://YOUR_OPENAI_COMPATIBLE_HOST/v1"', (ConvertTo-JsonString $LlmBaseUrl.TrimEnd('/'))).Replace('"YOUR_MODEL_ID"', (ConvertTo-JsonString $LlmModel))
+}
+
 Push-Location $Root
 try {
     npm ci
@@ -70,7 +90,7 @@ try {
     # Preflight only: compile without creating remote resources or secrets.
     if ($SkipDeploy) {
         $configText = (Get-Content -Raw -LiteralPath $Template -Encoding utf8)
-        $configText = $configText.Replace('xbloom-ai-brew-studio', $WorkerName).Replace('https://YOUR_OPENAI_COMPATIBLE_HOST/v1', $LlmBaseUrl.TrimEnd('/')).Replace('YOUR_MODEL_ID', $LlmModel)
+        $configText = New-WranglerConfigText $configText
         $configText = Set-XhsBrowserProfile $configText
         [IO.File]::WriteAllText($Config, $configText, [Text.UTF8Encoding]::new($false))
         Invoke-Npx @('wrangler','deploy','--dry-run','--config',$Config)
@@ -93,7 +113,7 @@ try {
     if (-not $databaseId) { throw "D1 database id was not found for $DatabaseName" }
 
     $configText = (Get-Content -Raw -LiteralPath $Template -Encoding utf8)
-    $configText = $configText.Replace('xbloom-ai-brew-studio', $WorkerName).Replace('00000000-0000-0000-0000-000000000000', $databaseId).Replace('https://YOUR_OPENAI_COMPATIBLE_HOST/v1', $LlmBaseUrl.TrimEnd('/')).Replace('YOUR_MODEL_ID', $LlmModel)
+    $configText = New-WranglerConfigText $configText $databaseId
     $configText = Set-XhsBrowserProfile $configText
     [IO.File]::WriteAllText($Config, $configText, [Text.UTF8Encoding]::new($false))
 
@@ -131,6 +151,12 @@ try {
         Write-Host 'Existing EDGE_PROXY_SECRET preserved; local EdgeOne copy is available.'
     } else {
         Write-Warning 'EDGE_PROXY_SECRET exists remotely but the local copy is absent. Use -RotateEdgeProxySecret before configuring a new EdgeOne project.'
+    }
+    if (Test-Path -LiteralPath $EdgeSecretFile) {
+        $driveFormat = Get-XbloomDriveFormat $EdgeSecretFile
+        if (-not (Protect-XbloomPrivatePath -Path $EdgeSecretFile -DriveFormat $driveFormat)) {
+            Write-Warning ("SECURITY WARNING: " + $driveFormat + " does not support per-user Windows ACLs. Keep the Cloudflare .wrangler directory private.")
+        }
     }
 
     if ($ConfigureSharedGuestModel) {

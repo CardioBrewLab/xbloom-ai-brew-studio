@@ -4,13 +4,15 @@
  * - 已登录时打开"发布预览弹窗"，确认全部字段后发布
  */
 import { useState } from "react";
-import { api, type CloudStatus } from "../lib/api.js";
+import { api, type CloudRegion, type CloudStatus } from "../lib/api.js";
 import type { Recipe } from "../lib/recipe-schema.js";
 import { btnPrimary, Card, CardHeader, Field, inputCls, Spinner, StatusDot } from "./ui.js";
 
 export interface PublishPanelProps {
   recipe: Recipe | null;
   cloud: CloudStatus | null;
+  cloudRegion: CloudRegion;
+  onCloudRegionChange: (region: CloudRegion) => void;
   /** 云端状态变化（登录/登出）后通知外层刷新 */
   onCloudChanged: () => void;
   /** 打开发布预览弹窗 */
@@ -25,6 +27,8 @@ export interface PublishPanelProps {
 export default function PublishPanel({
   recipe,
   cloud,
+  cloudRegion,
+  onCloudRegionChange,
   onCloudChanged,
   onOpenPreview,
   onOpenWorkspaceAccount,
@@ -40,7 +44,7 @@ export default function PublishPanel({
     setLoggingIn(true);
     setError("");
     try {
-      await api.cloudLogin(email.trim(), password);
+      await api.cloudLogin(email.trim(), password, cloudRegion);
       setEmail("");
       setPassword("");
       onCloudChanged();
@@ -54,7 +58,7 @@ export default function PublishPanel({
   const logout = async () => {
     setError("");
     try {
-      await api.cloudLogout();
+      await api.cloudLogout(cloudRegion);
       onCloudChanged();
     } catch (e) {
       setError((e as Error).message);
@@ -102,6 +106,35 @@ export default function PublishPanel({
           </button>
         ) : !loggedIn ? (
           <div className="space-y-3">
+            <Field label="账号区域" hint="与手机 xBloom App 的账号区域保持一致">
+              <div
+                role="radiogroup"
+                aria-label="xBloom 账号区域"
+                className="grid grid-cols-2 gap-2 rounded-xl border border-[var(--line)] bg-[var(--bg-inset)] p-1"
+              >
+                {(
+                  [
+                    ["cn", "中国区"],
+                    ["global", "全球区"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={cloudRegion === value}
+                    onClick={() => onCloudRegionChange(value)}
+                    className={`min-h-11 rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+                      cloudRegion === value
+                        ? "bg-[var(--bg-card)] text-[var(--tx-1)] shadow-sm"
+                        : "text-[var(--tx-3)]"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </Field>
             <Field label="xBloom 账号邮箱">
               <input
                 type="email"

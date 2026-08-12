@@ -15,10 +15,12 @@
  *
  * 说明：index.ts 由另一位工程师挂载（动态 import + try/catch），本文件只负责导出 Router。
  */
+import path from "node:path";
 import { Router, json, type NextFunction, type Request, type Response } from "express";
 import { RecipeSchema, type Recipe } from "../lib/recipe-schema.js";
 import { validateForTarget } from "../lib/safety.js";
 import { writeBackAlignedRecipe } from "../lib/local-writeback.js";
+import { IdempotentOperationRegistry } from "../lib/idempotent-operation.js";
 import {
   checkReachable,
   clearSession,
@@ -26,22 +28,32 @@ import {
   deleteRecipe,
   ensureSession,
   fetchSharedRecipe,
+  getSessionFile,
   hasAutoLoginCredentials,
   listMyRecipes,
   loadSession,
   login,
   maskEmail,
+  normalizeXbloomRegion,
   prewarmSession,
   readBackCloudRecipe,
+  recoverCreatedRecipe,
   toCloudPayload,
   updateRecipe,
   type CloudSession,
+  type PublishResult,
 } from "../lib/xbloom-cloud.js";
 
 // 启动自检：配置了凭据且无现成会话时后台异步预热登录；失败只记日志，不影响服务启动
 void prewarmSession();
 
 const router = Router();
+const cloudPublishOperations = new IdempotentOperationRegistry<PublishResult>(
+  50_000,
+  path.join(path.dirname(getSessionFile()), "cloud-publish-operations.json"),
+);
+const REQUEST_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 // 兜底：即便宿主未提前挂 express.json()，本路由也能解析 JSON body
 router.use(json({ limit: "1mb" }));
 // JSON 解析错误统一转成 {ok:false}，不让 Express 默认错误页/崩溃接管
@@ -77,12 +89,18 @@ router.post(
   safe(async (req, res) => {
     const email = typeof req.body?.email === "string" ? req.body.email.trim() : "";
     const password = typeof req.body?.password === "string" ? req.body.password : "";
+    const region = normalizeXbloomRegion(req.body?.region);
     if (!email || !password) {
       res.json({ ok: false, message: "缺少 email 或 password" });
       return;
     }
-    const session = await login(email, password);
-    res.json({ ok: true, memberId: session.memberId, email: maskEmail(session.email) });
+    const session = await login(email, password, region);
+    res.json({
+      ok: true,
+      memberId: session.memberId,
+      email: maskEmail(session.email),
+      region: session.region,
+    });
   }),
 );
 
@@ -99,10 +117,10 @@ router.post(
 router.get(
   "/status",
   safe(async (_req, res) => {
-    const probe = await checkReachable(); // 内部 5s 快速失败，不抛异常
+    let session: CloudSession | null = loadSession();
+    const probe = await checkReachable(undefined, session?.region); // 内部 5s 快速失败，不抛异常
     // 自动登录：有缓存会话直接用；否则云端可达时尝试 ensureSession（.env 凭据静默登录），
     // 失败（凭据未配置/登录失败）仅按未登录处理，不透异常
-    let session: CloudSession | null = loadSession();
     if (!session && probe.reachable) {
       try {
         session = await ensureSession();
@@ -116,6 +134,8 @@ router.get(
       loggedIn,
       proxyUsed: probe.proxyUsed,
       autoLogin: hasAutoLoginCredentials(),
+      region: session?.region ?? normalizeXbloomRegion(undefined),
+      ...(loggedIn && session ? { memberId: String(session.memberId) } : {}),
       // 状态接口只返回脱敏标识；完整邮箱和密码始终留在本机加密会话中。
       ...(loggedIn && session?.email ? { email: maskEmail(session.email) } : {}),
       message: loggedIn
@@ -142,6 +162,12 @@ router.post(
     }
     const name =
       typeof req.body?.name === "string" && req.body.name.trim() ? req.body.name.trim() : undefined;
+    const clientRequestId =
+      typeof req.body?.clientRequestId === "string" ? req.body.clientRequestId.trim() : "";
+    if (clientRequestId && !REQUEST_ID_PATTERN.test(clientRequestId)) {
+      res.status(400).json({ ok: false, message: "clientRequestId 格式有误" });
+      return;
+    }
     // theColor 透传：body 显式指定的合法色值优先，其次配方自带 theColor
     let recipe: Recipe = parsed.data;
     const color = req.body?.theColor;
@@ -165,7 +191,18 @@ router.post(
     const session = await ensureSession();
     // 5. 发布并返回分享链接（adjustments：映射层为通过官方校验对总水/分段做过的对齐；
     //    readback：发布后回读云端存储值的 Σ分段==dose×ratio 等式验证报告，任务#45）
-    const result = await createRecipe(recipe, { name, session });
+    const result = clientRequestId
+      ? await cloudPublishOperations.runRecoverable(
+          `${session.region}:${session.memberId}`,
+          clientRequestId,
+          { recipe, name },
+          {
+            prepare: async () => (await listMyRecipes({ session })).map((row) => row.tableId),
+            execute: (beforeIds) => createRecipe(recipe, { name, session, beforeIds }),
+            recover: (beforeIds) => recoverCreatedRecipe(recipe, beforeIds, { name, session }),
+          },
+        )
+      : await createRecipe(recipe, { name, session });
     // 6. 对齐成功且有实际改写时，回写本地配方条目，避免本地/云端数值漂移（Stan 审查，任务#45）
     let localRecipeId: string | undefined;
     if (mapped.adjustments.length > 0) {
@@ -353,7 +390,8 @@ router.get(
       res.json({ ok: false, message: "缺少分享 ID" });
       return;
     }
-    const { recipe, raw } = await fetchSharedRecipe(shareId);
+    const region = normalizeXbloomRegion(req.query.region);
+    const { recipe, raw } = await fetchSharedRecipe(shareId, region);
     res.json({ ok: true, recipe, raw });
   }),
 );

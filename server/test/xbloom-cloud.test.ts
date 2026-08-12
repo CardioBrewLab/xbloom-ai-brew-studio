@@ -20,17 +20,22 @@ process.env.XBLOOM_EMAIL = "";
 process.env.XBLOOM_PASSWORD = "";
 const {
   API_BASE,
+  API_BASE_CN,
   AuthExpiredError,
   RSA_CHUNK_CIPHER,
   alignIntegerPours,
   buildShareUrl,
   clearSession,
+  cloudRecipeMatchesPayload,
   ensureSession,
   getSessionFile,
   hasAutoLoginCredentials,
   isAuthFailureResponse,
   loadSession,
+  login,
   maskEmail,
+  newestCloudRecipeId,
+  paginateRecipePages,
   parseRecipeVo,
   postJson,
   rsaEncrypt,
@@ -40,6 +45,40 @@ const {
   toCloudPayload,
   withSessionRetry,
 } = await import("../src/lib/xbloom-cloud.js");
+
+describe("response-loss create recovery", () => {
+  it("multiple identical post-snapshot matches choose one instead of creating again", () => {
+    assert.equal(newestCloudRecipeId([]), null);
+    assert.equal(newestCloudRecipeId([{ tableId: 41 }, { tableId: 43 }, { tableId: 42 }]), 43);
+  });
+
+  it("matches every executable cloud field and rejects a near duplicate", () => {
+    const mapped = toCloudPayload(makeValidRecipe(), "Recovery Brew");
+    const raw = {
+      tableId: 808,
+      ...mapped.payload,
+      pourList: mapped.payload.pourDataJSONStr,
+    };
+    const row = {
+      tableId: 808,
+      theName: String(mapped.payload.theName),
+      dose: Number(mapped.payload.dose),
+      grandWater: Number(mapped.payload.grandWater),
+      grinderSize: Number(mapped.payload.grinderSize),
+      rpm: Number(mapped.payload.rpm),
+      cupType: Number(mapped.payload.cupType),
+      theColor: String(mapped.payload.theColor),
+      isEnableBypassWater: Number(mapped.payload.isEnableBypassWater),
+      bypassTemp: Number(mapped.payload.bypassTemp),
+      bypassVolume: Number(mapped.payload.bypassVolume),
+      isSetGrinderSize: Number(mapped.payload.isSetGrinderSize),
+      shareUrl: "https://share.example/808",
+      raw,
+    };
+    assert.equal(cloudRecipeMatchesPayload(row, mapped.payload), true);
+    assert.equal(cloudRecipeMatchesPayload({ ...row, rpm: row.rpm + 1 }, mapped.payload), false);
+  });
+});
 
 // 会话相关用例会写 data/session.json：先备份真实文件，全部跑完后原样还原
 const sessionFile = getSessionFile();
@@ -68,6 +107,46 @@ describe("shareId ↔ base64(tableId) 往返", () => {
 
   it("分享链接格式为 share-h5.xbloom.com/?id=<base64>", () => {
     assert.equal(buildShareUrl(12345), "https://share-h5.xbloom.com/?id=MTIzNDU%3D");
+  });
+});
+
+describe("配方列表分页", () => {
+  it("分页读取有上限、遇到短页停止并按 tableId 去重", async () => {
+    const requestedPages: number[] = [];
+    const rows = await paginateRecipePages(
+      async (pageNumber, countPerPage) => {
+        requestedPages.push(pageNumber);
+        assert.equal(countPerPage, 2);
+        const pages: Record<string, unknown>[][] = [
+          [{ tableId: 1 }, { tableId: 2 }],
+          [{ tableId: 2 }, { tableId: 3 }],
+          [{ tableId: 4 }],
+        ];
+        return pages[pageNumber - 1] ?? [];
+      },
+      { countPerPage: 2, maxPages: 5 },
+    );
+    assert.deepEqual(
+      rows.map((row) => row.tableId),
+      [1, 2, 3, 4],
+    );
+    assert.deepEqual(requestedPages, [1, 2, 3]);
+  });
+
+  it("重复满页响应也在 maxPages 内停止", async () => {
+    let calls = 0;
+    const rows = await paginateRecipePages(
+      async () => {
+        calls += 1;
+        return [{ tableId: 9 }, { tableId: 10 }];
+      },
+      { countPerPage: 2, maxPages: 3 },
+    );
+    assert.equal(calls, 2);
+    assert.deepEqual(
+      rows.map((row) => row.tableId),
+      [9, 10],
+    );
   });
 });
 
@@ -454,7 +533,12 @@ describe("内部配方 → 云端 payload 映射", () => {
 });
 
 describe("自动登录：ensureSession / withSessionRetry / 鉴权失效识别", () => {
-  const fakeSession = { memberId: 999, token: "fake-token", email: "unit@test.local" };
+  const fakeSession = {
+    memberId: 999,
+    token: "fake-token",
+    email: "unit@test.local",
+    region: "global" as const,
+  };
 
   it("会话落盘使用当前 Windows 用户 DPAPI，不出现 Token、邮箱或 memberId 明文", () => {
     clearSession();
@@ -557,9 +641,66 @@ describe("自动登录：ensureSession / withSessionRetry / 鉴权失效识别",
 
   it("withSessionRetry：优先使用调用方传入的会话", async () => {
     clearSession();
-    const preferred = { memberId: 7, token: "t7", email: "p@test.local" };
+    const preferred = {
+      memberId: 7,
+      token: "t7",
+      email: "p@test.local",
+      region: "cn" as const,
+    };
     const out = await withSessionRetry(async (s) => s.memberId, preferred);
     assert.equal(out, 7);
+  });
+});
+
+describe("xBloom 区域随会话保持", () => {
+  const realDispatcher = getGlobalDispatcher();
+  const jsonBody = (obj: unknown) => JSON.stringify(obj);
+
+  for (const [region, origin] of [
+    ["global", API_BASE],
+    ["cn", API_BASE_CN],
+  ] as const) {
+    it(`${region} 登录请求命中对应端点并把区域写入会话`, async () => {
+      const agent = new MockAgent();
+      setGlobalDispatcher(agent);
+      clearSession();
+      try {
+        agent
+          .get(new URL(origin).origin)
+          .intercept({
+            path: "/tMemberLogin.thtml",
+            method: "POST",
+            headers: {
+              referer: `${region === "cn" ? "https://share-h5.xbloomcoffee.cn" : "https://share-h5.xbloom.com"}/`,
+            },
+          })
+          .reply(
+            200,
+            jsonBody({ result: "success", member: { tableId: 42 }, token: "region-token" }),
+            { headers: { "content-type": "application/json" } },
+          );
+        const session = await login("region@test.local", "secret", region);
+        assert.equal(session.region, region);
+        assert.equal(loadSession()?.region, region);
+        agent.assertNoPendingInterceptors();
+      } finally {
+        clearSession();
+        setGlobalDispatcher(realDispatcher);
+        await agent.close();
+      }
+    });
+  }
+
+  it("历史会话缺少 region 时按环境默认区升级", () => {
+    clearSession();
+    fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+    fs.writeFileSync(
+      sessionFile,
+      JSON.stringify({ memberId: 8, token: "legacy-token", email: "legacy@test.local" }),
+      "utf8",
+    );
+    assert.equal(loadSession()?.region, "global");
+    clearSession();
   });
 });
 

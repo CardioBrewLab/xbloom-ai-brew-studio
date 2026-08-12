@@ -7,8 +7,21 @@
  */
 import { useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
-import { api, type CloudStatus } from "../lib/api.js";
-import { shouldBindCloudRecord } from "../lib/cloud-publish-state.js";
+import { api, type CloudRegion, type CloudStatus } from "../lib/api.js";
+import {
+  cloudAccountKey,
+  cloudPublishTarget,
+  pendingPublishForAccount,
+  shouldBindCloudRecord,
+  type PendingCloudPublish,
+} from "../lib/cloud-publish-state.js";
+import {
+  clearCloudPublishRequestCheckpoint,
+  loadCloudPublishRequestCheckpoint,
+  markCloudPublishRequestCreated,
+  prepareCloudPublishRequest,
+  type CloudPublishRequestCheckpoint,
+} from "../lib/cloud-publish-request.js";
 import { CUP_TYPES, type Recipe } from "../lib/recipe-schema.js";
 import { PATTERN_LABELS } from "../lib/curve-math.js";
 import { btnGhost, btnPrimary, Field, inputCls, Modal, Spinner } from "./ui.js";
@@ -34,8 +47,16 @@ export interface PublishPreviewModalProps {
   onLoggedIn?: () => void;
   /** 云端来源 tableId（从云端导入的配方）：存在时发布走更新而非新建 */
   cloudTableId?: string;
+  /** 上次写入已创建但回读待确认时的记录；重开弹窗继续更新该记录。 */
+  pendingCloudPublish?: PendingCloudPublish;
+  /** 记录待确认的云端写入，避免关闭弹窗后丢失 tableId。 */
+  onPendingPublished?: (pending: PendingCloudPublish) => void;
+  /** 当前云端账号区域；未登录时仍可在弹窗内选择。 */
+  cloudRegion?: CloudRegion;
+  /** 新建发布的稳定请求号；网络丢失响应后重试仍指向同一次云端写入。 */
+  publishRequestId: string;
   /** 发布/更新成功后回传 tableId，供外层后续发布改走更新链路 */
-  onPublished?: (tableId: string) => void | Promise<void>;
+  onPublished?: (tableId: string) => boolean | Promise<boolean>;
 }
 
 export default function PublishPreviewModal({
@@ -45,6 +66,10 @@ export default function PublishPreviewModal({
   cloud,
   onLoggedIn,
   cloudTableId,
+  pendingCloudPublish,
+  onPendingPublished,
+  cloudRegion: cloudRegionProp,
+  publishRequestId,
   onPublished,
 }: PublishPreviewModalProps) {
   const [draft, setDraft] = useState<Recipe | null>(null);
@@ -64,6 +89,10 @@ export default function PublishPreviewModal({
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loggingIn, setLoggingIn] = useState(false);
+  const [selectedCloudRegion, setSelectedCloudRegion] = useState<CloudRegion>("cn");
+  const [requestCheckpoint, setRequestCheckpoint] = useState<CloudPublishRequestCheckpoint | null>(
+    null,
+  );
   /** 发布预演：后端对齐官方 ratio 0.1 步进后实际上传的值（任务 #39） */
   const [preview, setPreview] = useState<{
     adjustments: string[];
@@ -76,12 +105,30 @@ export default function PublishPreviewModal({
   /** 预演失败降级提示（Kim 审查：不能被 catch 吞掉后误呈"无需对齐"） */
   const [previewError, setPreviewError] = useState("");
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const checkpointAccountKeyRef = useRef("");
+  const currentCloudAccountKey = cloudAccountKey(cloud, cloudRegionProp ?? "cn");
+  const activePendingCloudPublish = pendingPublishForAccount(
+    pendingCloudPublish,
+    currentCloudAccountKey,
+  );
 
   // 每次打开 → 以当前配方初始化草稿
   useEffect(() => {
     if (open && recipe) {
-      setDraft(JSON.parse(JSON.stringify(recipe)) as Recipe);
-      setPublishName(recipe.name);
+      const region = activePendingCloudPublish?.region ?? cloudRegionProp ?? cloud?.region ?? "cn";
+      const recovered = loadCloudPublishRequestCheckpoint(
+        recipe,
+        currentCloudAccountKey,
+        window.localStorage,
+      );
+      checkpointAccountKeyRef.current = currentCloudAccountKey;
+      setRequestCheckpoint(recovered ?? null);
+      setDraft(
+        recovered
+          ? (JSON.parse(JSON.stringify(recovered.recipe)) as Recipe)
+          : (JSON.parse(JSON.stringify(recipe)) as Recipe),
+      );
+      setPublishName(recovered?.name ?? recipe.name);
       setShareUrl("");
       setTableId("");
       setPublishedMode("");
@@ -90,9 +137,36 @@ export default function PublishPreviewModal({
       setPreview(null);
       setPreviewError("");
       setPublishAdjustments([]);
+      setSelectedCloudRegion(recovered?.region ?? region);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  // Hosted status may resolve only after the modal opens (or after inline login).
+  // Once the concrete App account becomes known, restore that account's exact
+  // unresolved payload instead of issuing a fresh request from the default draft.
+  useEffect(() => {
+    if (!open || !recipe || !currentCloudAccountKey) return;
+    const previousAccountKey = checkpointAccountKeyRef.current;
+    if (previousAccountKey === currentCloudAccountKey) return;
+    const recovered = loadCloudPublishRequestCheckpoint(
+      recipe,
+      currentCloudAccountKey,
+      window.localStorage,
+    );
+    checkpointAccountKeyRef.current = currentCloudAccountKey;
+    setRequestCheckpoint(recovered ?? null);
+    if (recovered) {
+      setDraft(JSON.parse(JSON.stringify(recovered.recipe)) as Recipe);
+      setPublishName(recovered.name ?? recovered.recipe.name);
+      setSelectedCloudRegion(recovered.region);
+    } else if (previousAccountKey) {
+      // A real account switch must never carry account A's draft into account B.
+      setDraft(JSON.parse(JSON.stringify(recipe)) as Recipe);
+      setPublishName(recipe.name);
+      setSelectedCloudRegion(cloudRegionProp ?? cloud?.region ?? "cn");
+    }
+  }, [cloud?.region, cloudRegionProp, currentCloudAccountKey, open, recipe]);
 
   // 已登录且打开中 → 向后端预演实际上传值（仅在影响对齐的字段变化时重拉）
   const previewSrc = draft ?? recipe;
@@ -111,7 +185,7 @@ export default function PublishPreviewModal({
     }
     let cancelled = false;
     api
-      .cloudPublishPreview(previewSrc)
+      .cloudPublishPreview(previewSrc, undefined, selectedCloudRegion)
       .then((r) => {
         if (cancelled) return;
         if (r.ok) {
@@ -139,7 +213,7 @@ export default function PublishPreviewModal({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, alignKey, cloud?.loggedIn]);
+  }, [open, alignKey, cloud?.loggedIn, selectedCloudRegion]);
 
   // 渲染二维码
   useEffect(() => {
@@ -154,6 +228,21 @@ export default function PublishPreviewModal({
   if (!recipe) return null;
   const d = draft ?? recipe;
   const loggedIn = cloud?.loggedIn ?? false;
+  const recoveredPendingCloudPublish = requestCheckpoint?.tableId
+    ? {
+        tableId: requestCheckpoint.tableId,
+        shareUrl: requestCheckpoint.shareUrl ?? "",
+        region: requestCheckpoint.region,
+        accountKey: requestCheckpoint.accountKey,
+        recipeKey: JSON.stringify(recipe),
+      }
+    : undefined;
+  const publishTarget = cloudPublishTarget(
+    cloudTableId,
+    activePendingCloudPublish ?? recoveredPendingCloudPublish,
+  );
+  const publishRegion =
+    activePendingCloudPublish?.region ?? requestCheckpoint?.region ?? selectedCloudRegion;
 
   const setPourName = (i: number, name: string) =>
     setDraft((prev) =>
@@ -167,7 +256,7 @@ export default function PublishPreviewModal({
     setLoggingIn(true);
     setError("");
     try {
-      await api.cloudLogin(email.trim(), password);
+      await api.cloudLogin(email.trim(), password, selectedCloudRegion);
       setPassword("");
       onLoggedIn?.();
     } catch (e) {
@@ -183,23 +272,80 @@ export default function PublishPreviewModal({
     setError("");
     try {
       const name = publishName.trim() || undefined;
-      if (cloudTableId) {
+      if (publishTarget.tableId) {
         // 云端来源配方 → 更新原记录，不新建重复配方
-        const res = await api.cloudUpdateRecipe(cloudTableId, { recipe: draft, name });
+        const res = await api.cloudUpdateRecipe(
+          publishTarget.tableId,
+          { recipe: draft, name },
+          publishRegion,
+        );
         setPublishedMode("update");
         setShareUrl(res.shareUrl);
         setTableId(res.tableId);
         setPublishAdjustments(res.adjustments ?? []);
         setPublishVerification(res.verification);
-        if (shouldBindCloudRecord(res.verification)) await onPublished?.(String(res.tableId));
+        if (shouldBindCloudRecord(res.verification)) {
+          const bound = await onPublished?.(String(res.tableId));
+          if (bound && requestCheckpoint) {
+            clearCloudPublishRequestCheckpoint(requestCheckpoint, window.localStorage);
+            setRequestCheckpoint(null);
+          }
+        } else {
+          onPendingPublished?.({
+            tableId: String(res.tableId),
+            shareUrl: res.shareUrl,
+            region: publishRegion,
+            accountKey: currentCloudAccountKey,
+            recipeKey: JSON.stringify(recipe),
+          });
+        }
       } else {
-        const res = await api.cloudPublish(draft, name);
+        const checkpoint = prepareCloudPublishRequest(
+          recipe,
+          draft,
+          name,
+          currentCloudAccountKey,
+          publishRegion,
+          window.localStorage,
+          publishRequestId,
+          requestCheckpoint ?? undefined,
+        );
+        setRequestCheckpoint(checkpoint);
+        const res = await api.cloudPublish(
+          checkpoint.recipe,
+          checkpoint.name,
+          checkpoint.region,
+          checkpoint.requestId,
+        );
+        const createdCheckpoint = markCloudPublishRequestCreated(
+          checkpoint,
+          String(res.tableId),
+          res.shareUrl,
+          window.localStorage,
+        );
+        setRequestCheckpoint(createdCheckpoint);
         setPublishedMode("create");
         setShareUrl(res.shareUrl);
         setTableId(res.tableId);
         setPublishAdjustments(res.adjustments ?? []);
         setPublishVerification(res.verification);
-        if (shouldBindCloudRecord(res.verification)) await onPublished?.(String(res.tableId));
+        // The xBloom row already exists at this point. Record its ID before the
+        // separate local-history binding so a local failure still reopens as an
+        // update rather than creating a second cloud row.
+        onPendingPublished?.({
+          tableId: String(res.tableId),
+          shareUrl: res.shareUrl,
+          region: publishRegion,
+          accountKey: currentCloudAccountKey,
+          recipeKey: JSON.stringify(recipe),
+        });
+        if (shouldBindCloudRecord(res.verification)) {
+          const bound = await onPublished?.(String(res.tableId));
+          if (bound) {
+            clearCloudPublishRequestCheckpoint(createdCheckpoint, window.localStorage);
+            setRequestCheckpoint(null);
+          }
+        }
       }
     } catch (e) {
       setError((e as Error).message);
@@ -213,9 +359,15 @@ export default function PublishPreviewModal({
     setPublishing(true);
     setError("");
     try {
-      const res = await api.cloudVerifyRecipe(tableId);
+      const res = await api.cloudVerifyRecipe(tableId, publishRegion);
       setPublishVerification(res.verification);
-      if (shouldBindCloudRecord(res.verification)) await onPublished?.(tableId);
+      if (shouldBindCloudRecord(res.verification)) {
+        const bound = await onPublished?.(tableId);
+        if (bound && requestCheckpoint) {
+          clearCloudPublishRequestCheckpoint(requestCheckpoint, window.localStorage);
+          setRequestCheckpoint(null);
+        }
+      }
     } catch (reason) {
       setError((reason as Error).message);
     } finally {
@@ -243,7 +395,7 @@ export default function PublishPreviewModal({
       sub="确认上传到 xBloom 官方云端的全部字段"
       wide
     >
-      {shareUrl ? (
+      {tableId ? (
         /* -------- 发布成功 -------- */
         <div className="animate-fade-up space-y-4 text-center">
           <p
@@ -269,6 +421,11 @@ export default function PublishPreviewModal({
                   ? "回读发现差异，请先核对 · "
                   : "回读待确认 · "}
               {publishVerification.message}
+            </p>
+          )}
+          {error && (
+            <p className="mx-auto max-w-md rounded-lg border border-[var(--bad)]/50 bg-[color-mix(in_srgb,var(--bad)_10%,transparent)] px-3 py-2 text-left text-xs text-[var(--bad)]">
+              ⚠ {error}
             </p>
           )}
           {publishVerification?.state !== "verified" && (
@@ -299,26 +456,37 @@ export default function PublishPreviewModal({
               </ul>
             </div>
           )}
-          <a
-            href={shareUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="block break-all text-base font-semibold leading-snug text-[var(--tx-1)] underline decoration-[var(--acc)] decoration-2 underline-offset-4 hover:text-[var(--acc)]"
-          >
-            {shareUrl}
-          </a>
-          <div className="flex justify-center">
-            <div className="rounded-xl border border-[var(--line)] bg-[var(--bg-card)] p-3 shadow-[var(--shadow-card)]">
-              <canvas ref={canvasRef} width={180} height={180} />
-            </div>
-          </div>
-          <p className="text-[11px] text-[var(--tx-3)]">
-            用手机扫描二维码或打开链接，即可将配方导入 xBloom 官方 APP 冲煮
-          </p>
+          {shareUrl ? (
+            <>
+              <a
+                href={shareUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="block break-all text-base font-semibold leading-snug text-[var(--tx-1)] underline decoration-[var(--acc)] decoration-2 underline-offset-4 hover:text-[var(--acc)]"
+              >
+                {shareUrl}
+              </a>
+              <div className="flex justify-center">
+                <div className="rounded-xl border border-[var(--line)] bg-[var(--bg-card)] p-3 shadow-[var(--shadow-card)]">
+                  <canvas ref={canvasRef} width={180} height={180} />
+                </div>
+              </div>
+              <p className="text-[11px] text-[var(--tx-3)]">
+                用手机扫描二维码或打开链接，即可将配方导入 xBloom 官方 APP 冲煮
+              </p>
+            </>
+          ) : (
+            <p className="mx-auto max-w-md rounded-lg border border-[var(--line)] bg-[var(--bg-inset)] px-3 py-2 text-left text-xs text-[var(--tx-2)]">
+              配方已写入当前 xBloom 账号。中国区接口本次未返回分享链接，请在手机 xBloom App
+              的云端配方中查看。
+            </p>
+          )}
           <div className="flex justify-center gap-2">
-            <button type="button" onClick={() => void copy()} className={btnGhost}>
-              {copied ? "✓ 已复制" : "复制链接"}
-            </button>
+            {shareUrl && (
+              <button type="button" onClick={() => void copy()} className={btnGhost}>
+                {copied ? "✓ 已复制" : "复制链接"}
+              </button>
+            )}
             <button type="button" onClick={onClose} className={btnGhost}>
               完成
             </button>
@@ -342,6 +510,30 @@ export default function PublishPreviewModal({
           <p className="text-[11px] leading-relaxed text-[var(--tx-3)]">
             在线工作台仅保存加密会话令牌；密码只用于本次登录请求。
           </p>
+          <Field label="账号区域" hint="与 xBloom App 的账号区域保持一致">
+            <div className="grid grid-cols-2 gap-2 rounded-xl border border-[var(--line)] bg-[var(--bg-inset)] p-1">
+              {(
+                [
+                  ["cn", "中国区"],
+                  ["global", "全球区"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={selectedCloudRegion === value}
+                  onClick={() => setSelectedCloudRegion(value)}
+                  className={`rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+                    selectedCloudRegion === value
+                      ? "bg-[var(--bg-card)] text-[var(--tx-1)] shadow-sm"
+                      : "text-[var(--tx-3)]"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </Field>
           <Field label="密码">
             <input
               type="password"
@@ -370,6 +562,11 @@ export default function PublishPreviewModal({
       ) : (
         /* -------- 字段预览与编辑 -------- */
         <div className="space-y-4">
+          {publishTarget.tableId && !cloudTableId && (
+            <p className="rounded-xl border border-[var(--acc-line)] bg-[var(--acc-soft)] px-3 py-2 text-xs text-[var(--tx-2)]">
+              检测到上次发布记录，将继续更新该云端记录，避免重复创建。
+            </p>
+          )}
           {/* 预演失败降级提示：不误呈"无需对齐"（Kim 审查） */}
           {previewError && (
             <div className="rounded-xl border border-[var(--line-strong)] bg-[var(--bg-inset)] px-3 py-2 text-xs text-[var(--tx-2)]">
@@ -541,10 +738,10 @@ export default function PublishPreviewModal({
             >
               {publishing ? (
                 <>
-                  <Spinner /> {cloudTableId ? "更新中…" : "发布中…"}
+                  <Spinner /> {publishTarget.tableId ? "更新中…" : "发布中…"}
                 </>
-              ) : cloudTableId ? (
-                `更新云端配方 ${cloudTableId}`
+              ) : publishTarget.tableId ? (
+                `更新云端配方 ${publishTarget.tableId}`
               ) : (
                 "确认发布到云端"
               )}

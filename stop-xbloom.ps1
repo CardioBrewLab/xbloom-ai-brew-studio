@@ -48,7 +48,9 @@ function Test-ProjectServiceProcess($Process, [string]$Name) {
     }
     if ($Name -eq 'Backend') {
         return ($Process.CommandLine -match '(?i)npm(?:\.cmd)?\s+run\s+dev') -or
-            (($Process.CommandLine -match '(?i)tsx') -and ($Process.CommandLine -match '(?i)src[\\/]index\.ts'))
+            (($Process.CommandLine -match '(?i)tsx') -and ($Process.CommandLine -match '(?i)src[\\/]index\.ts')) -or
+            (($Process.CommandLine -match '(?i)(?:^|[\\/\s])node(?:\.exe)?(?:[\s"'']|$)') -and
+                ($Process.CommandLine -match '(?i)server[\\/]dist[\\/]index\.js'))
     }
     if ($Name -eq 'Frontend') {
         return ($Process.CommandLine -match '(?i)npx(?:\.cmd)?\s+vite') -or

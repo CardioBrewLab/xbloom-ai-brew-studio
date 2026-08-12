@@ -15,6 +15,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 $ROOT = $PSScriptRoot
 if (-not $ROOT) { $ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path }
+. (Join-Path $ROOT 'scripts\windows-compat.ps1')
 
 # The one-click installer keeps Node.js inside the project, so launching the app
 # never depends on a machine-wide Node installation.
@@ -30,6 +31,8 @@ if (-not (Test-Path -LiteralPath $logDir)) {
 $logFile    = Join-Path $logDir 'xbloom-watchdog.log'
 $backendLog  = Join-Path $logDir 'xbloom-backend.log'
 $frontendLog = Join-Path $logDir 'xbloom-frontend.log'
+$backendErrorLog  = Join-Path $logDir 'xbloom-backend-error.log'
+$frontendErrorLog = Join-Path $logDir 'xbloom-frontend-error.log'
 
 function Write-Log {
     param([string]$msg)
@@ -39,13 +42,7 @@ function Write-Log {
 
 function Read-LocalPort {
     param([string]$Name, [int]$Fallback)
-    $envFile = Join-Path $ROOT '.env'
-    if (-not (Test-Path -LiteralPath $envFile)) { return $Fallback }
-    $line = Get-Content -LiteralPath $envFile -ErrorAction SilentlyContinue |
-        Where-Object { $_ -match ('^\s*' + [regex]::Escape($Name) + '\s*=') } |
-        Select-Object -Last 1
-    if (-not $line) { return $Fallback }
-    $raw = (($line -split '=', 2)[1] -split '#', 2)[0].Trim()
+    $raw = Get-XbloomEnvValue -Root $ROOT -Name $Name
     $parsed = 0
     if ([int]::TryParse($raw, [ref]$parsed) -and $parsed -ge 1 -and $parsed -le 65535) {
         return $parsed
@@ -73,6 +70,9 @@ $searxngPort       = 8899
 $searxngContainer  = 'xbloom-searxng'
 $lastSearxngCheck  = [DateTime]::MinValue
 $dockerLaunchPath  = 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
+$searxngEndpoint   = Get-XbloomEnvValue -Root $ROOT -Name 'SEARXNG_URL'
+$searxngSelfHealEnabled = Test-XbloomDefaultLoopbackEndpoint -Value $searxngEndpoint -Port $searxngPort
+$script:searxngSelfHealLogged = $false
 
 # --- task #99: Docker self-heal convergence state (script scope, survives loop iterations) ---
 $noDockerFlagPath           = Join-Path $logDir 'no-docker.flag'  # present => skip Docker self-heal entirely
@@ -128,6 +128,14 @@ function Ensure-Searxng {
     # Throttle: at most one probe per 60 seconds.
     if (((Get-Date) - $lastSearxngCheck).TotalSeconds -lt 60) { return }
     $script:lastSearxngCheck = Get-Date
+
+    if (-not $searxngSelfHealEnabled) {
+        if (-not $script:searxngSelfHealLogged) {
+            Write-Log 'Custom or remote SEARXNG_URL detected; local SearXNG/Docker self-heal disabled.'
+            $script:searxngSelfHealLogged = $true
+        }
+        return
+    }
 
     # Task #99: no-docker.flag -- user deliberately keeps Docker off; skip self-heal.
     if (Test-Path -LiteralPath $noDockerFlagPath) {
@@ -205,6 +213,9 @@ function Ensure-Searxng {
 $xhsMcpPort      = 18060
 $lastXhsMcpCheck = [DateTime]::MinValue
 $xhsMcpScript    = Join-Path $ROOT 'tools\xhs-mcp\start-xhs-mcp.ps1'
+$xhsMcpEndpoint  = Get-XbloomEnvValue -Root $ROOT -Name 'XHS_MCP_URL'
+$xhsMcpSelfHealEnabled = Test-XbloomDefaultLoopbackEndpoint -Value $xhsMcpEndpoint -Port $xhsMcpPort
+$script:xhsMcpSelfHealLogged = $false
 
 function Test-XhsMcpUp {
     try {
@@ -216,6 +227,15 @@ function Ensure-XhsMcp {
     # Throttle: at most one probe per 300 seconds.
     if (((Get-Date) - $lastXhsMcpCheck).TotalSeconds -lt 300) { return }
     $script:lastXhsMcpCheck = Get-Date
+
+    if (-not $xhsMcpSelfHealEnabled) {
+        if (-not $script:xhsMcpSelfHealLogged) {
+            Write-Log 'Custom or remote XHS_MCP_URL detected; local XHS MCP self-heal disabled.'
+            $script:xhsMcpSelfHealLogged = $true
+        }
+        return
+    }
+
     if (Test-XhsMcpUp) { return }
     if (-not (Test-Path -LiteralPath $xhsMcpScript)) {
         Write-Log "XHS MCP launcher not found; cannot restore xiaohongshu-mcp."
@@ -312,22 +332,14 @@ function Test-PortOwned {
 function Start-HiddenService {
     param(
         [string]$WorkDir,
-        [string[]]$Cmd,
-        [string]$LogFile
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [string]$LogFile,
+        [string]$ErrorLogFile
     )
-    # Put the absolute project workdir in the launcher's command line. The
-    # ownership guard can then identify both the cmd root and its Node child.
-    $commandText = 'cd /d "' + $WorkDir + '" && ' + ($Cmd -join ' ') + ' 1>"' + $LogFile + '" 2>&1'
-    $argLine = '/d /s /c "' + $commandText + '"'
-    try { if (Test-Path -LiteralPath $LogFile) { Clear-Content -LiteralPath $LogFile -ErrorAction SilentlyContinue } } catch { }
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = 'cmd.exe'
-    $psi.Arguments = $argLine
-    $psi.WorkingDirectory = $WorkDir
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-    $p = [System.Diagnostics.Process]::Start($psi)
+    # Start the executable directly. Going through cmd.exe expands %NAME%
+    # sequences in valid Windows paths before the child process sees them.
+    $p = Start-XbloomHiddenProcess -WorkDir $WorkDir -FilePath $FilePath -Arguments $Arguments -StandardOutput $LogFile -StandardError $ErrorLogFile
     return $p.Id
 }
 
@@ -338,7 +350,7 @@ function Start-ServiceIfPortFree {
         Write-Log ($Service.Name + " port " + $Service.Port + " is occupied by another process; waiting without launching a competing service.")
         return $false
     }
-    $Service.Pid = Start-HiddenService -WorkDir $Service.Dir -Cmd $Service.Cmd -LogFile $Service.Log
+    $Service.Pid = Start-HiddenService -WorkDir $Service.Dir -FilePath $Service.FilePath -Arguments $Service.Arguments -LogFile $Service.Log -ErrorLogFile $Service.ErrorLog
     Write-Log ($Service.Name + " " + $Action + ", pid=" + $Service.Pid)
     return $true
 }
@@ -376,13 +388,19 @@ if ($sharedBuild.ExitCode -ne 0) {
 }
 Write-Log 'Shared contract package rebuilt before service launch.'
 
+$nodeExecutable = Join-Path $localNodeHome 'node.exe'
+if (-not (Test-Path -LiteralPath $nodeExecutable -PathType Leaf)) {
+    $nodeExecutable = 'node.exe'
+}
+$viteEntry = Join-Path $ROOT 'node_modules\vite\bin\vite.js'
 $services = @(
     # Build once above, then let this watchdog be the only crash supervisor.
     # This avoids stale tsx transforms after a checkout is moved across drives.
-    # Use an absolute entry path so the listening Node child's command line carries
-    # this checkout root and remains recognizable after the watchdog itself restarts.
-    @{ Name='Backend';  Dir=$serverDir; Cmd=@('node.exe',('"' + (Join-Path $serverDir 'dist\index.js') + '"')); Port=$serverPort; Log=$backendLog;  Pid=$null; DownSince=$null; ConflictLoggedAt=$null; CrashCount=0; LastCrash=$null }
-    @{ Name='Frontend'; Dir=$webDir;    Cmd=@('..\node_modules\.bin\vite.cmd','--port',([string]$webPort),'--strictPort'); Port=$webPort; Log=$frontendLog; Pid=$null; DownSince=$null; ConflictLoggedAt=$null; CrashCount=0; LastCrash=$null }
+    # Use absolute Node script paths so the listening child's command line carries
+    # this checkout root and remains recognizable after the watchdog restarts.
+    # Direct Process.Start also keeps % sequences in paths literal.
+    @{ Name='Backend';  Dir=$serverDir; FilePath=$nodeExecutable; Arguments=@((Join-Path $serverDir 'dist\index.js')); Port=$serverPort; Log=$backendLog; ErrorLog=$backendErrorLog; Pid=$null; DownSince=$null; ConflictLoggedAt=$null; CrashCount=0; LastCrash=$null }
+    @{ Name='Frontend'; Dir=$webDir;    FilePath=$nodeExecutable; Arguments=@($viteEntry,'--port',([string]$webPort),'--strictPort'); Port=$webPort; Log=$frontendLog; ErrorLog=$frontendErrorLog; Pid=$null; DownSince=$null; ConflictLoggedAt=$null; CrashCount=0; LastCrash=$null }
 )
 
 Write-Log ("=== watchdog started; ROOT=" + $ROOT + " ===")

@@ -10,12 +10,10 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import http from "node:http";
-import { once } from "node:events";
-import type { AddressInfo } from "node:net";
 import express from "express";
 import { beansRouter, normalizeRoastLevel, sanitizeParsedBean } from "../src/routes/beans.js";
 import { config } from "../src/config.js";
-import { shutdownHttpServer } from "./helpers/http-server.js";
+import { fetchSafePort, shutdownHttpServer } from "./helpers/http-server.js";
 
 // ---------------------------------------------------------------------------
 // mock LLM：按序消费响应队列；stream:false 回一次性 JSON
@@ -63,8 +61,7 @@ before(async () => {
   app.use(express.json());
   app.use(beansRouter);
   appServer = app.listen(0, "127.0.0.1");
-  await once(appServer, "listening");
-  appPort = (appServer.address() as AddressInfo).port;
+  appPort = await fetchSafePort(appServer);
 });
 
 after(async () => {
@@ -80,8 +77,7 @@ async function useMockLlm(queue: QueuedResponse[]): Promise<Array<Record<string,
   await shutdownHttpServer(mock?.server);
   mock = startMockLlm(queue);
   mock.server.listen(0, "127.0.0.1");
-  await once(mock.server, "listening");
-  const port = (mock.server.address() as AddressInfo).port;
+  const port = await fetchSafePort(mock.server);
   config.llm.baseUrl = `http://127.0.0.1:${port}/v1`;
   config.llm.apiKey = "test-key";
   config.llm.model = "gpt-test"; // gpt 系：不下发 temperature（采样层治理口径）
@@ -265,6 +261,25 @@ describe("烘焙度归一与输出清洗纯函数（任务 #118）", () => {
     assert.deepEqual(out!.tastingNotes, ["草莓", "蓝莓"]);
     assert.equal(sanitizeParsedBean({ name: 123 }), null, "schema 不符返回 null");
     assert.equal(sanitizeParsedBean("not-an-object"), null);
+  });
+
+  it("sanitizeParsedBean：LLM 省略可选豆字段时补齐 null 与空风味数组", () => {
+    const out = sanitizeParsedBean({
+      name: "Kenya AA",
+      origin: "Kenya",
+      tastingNotes: ["blackcurrant"],
+    });
+    assert.ok(out);
+    assert.equal(out!.name, "Kenya AA");
+    assert.equal(out!.origin, "Kenya");
+    assert.equal(out!.roaster, null);
+    assert.equal(out!.estate, null);
+    assert.equal(out!.process, null);
+    assert.equal(out!.varietal, null);
+    assert.equal(out!.roastLevel, null);
+    assert.equal(out!.altitude, null);
+    assert.equal(out!.notes, null);
+    assert.deepEqual(out!.tastingNotes, ["blackcurrant"]);
   });
 
   it("sanitizeParsedBean：类别词不作为豆名；没有明确商品名时保持空值", () => {

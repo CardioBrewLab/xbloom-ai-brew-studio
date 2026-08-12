@@ -11,6 +11,7 @@ import {
   parseXhsSearchFeeds,
   releaseBrowserBudget,
   xhsResearchCacheKey,
+  xhsBrowserFailureMessage,
 } from "../src/xhs-browser.ts";
 
 function budgetDb(): {
@@ -140,6 +141,15 @@ it("千用户档提供独立的全站与单用户保护阈值", () => {
     ).ownerLimit,
     5,
   );
+});
+
+it("平台日时长耗尽与瞬时限频给出不同说明", () => {
+  const env = { XHS_BROWSER_PROFILE: "scale" };
+  assert.match(
+    xhsBrowserFailureMessage("429: Browser time limit exceeded for today", env),
+    /当日平台容量已用完/,
+  );
+  assert.match(xhsBrowserFailureMessage("429 Too many requests", env), /请求较多/);
 });
 
 it("检索关键词做 Unicode 与空白归一，缓存按 owner 隔离", async () => {

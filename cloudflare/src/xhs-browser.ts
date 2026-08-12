@@ -683,8 +683,22 @@ async function requestObject(request: Request): Promise<Record<string, unknown>>
   return parsed as Record<string, unknown>;
 }
 
-function publicFailure(error: unknown, env: XhsBrowserEnv): string {
-  const message = String((error as Error)?.message ?? error);
+export function xhsBrowserFailureMessage(
+  message: string,
+  env: Pick<
+    XhsBrowserEnv,
+    | "XHS_BROWSER_PROFILE"
+    | "XHS_BROWSER_QR_DAILY_LIMIT"
+    | "XHS_BROWSER_SEARCH_DAILY_LIMIT"
+    | "XHS_BROWSER_QR_OWNER_DAILY_LIMIT"
+    | "XHS_BROWSER_SEARCH_OWNER_DAILY_LIMIT"
+  >,
+): string {
+  if (
+    /browser time limit exceeded|time limit exceeded for today|daily browser limit/i.test(message)
+  ) {
+    return "当前 Cloudflare Browser Run 套餐的当日平台容量已用完；站点其他功能照常，本次先跳过小红书";
+  }
   if (/429|rate limit/i.test(message)) {
     return browserBudgetPolicy(env, "qr").profile === "scale"
       ? "云端浏览器当前请求较多，请稍后重试"
@@ -693,6 +707,10 @@ function publicFailure(error: unknown, env: XhsBrowserEnv): string {
   if (/timeout|timed out/i.test(message)) return "云端登录浏览器响应超时，请稍后重试";
   if (/session|connect/i.test(message)) return "登录二维码已失效，请重新取码";
   return "小红书云端浏览器本次执行异常，请稍后重试";
+}
+
+function publicFailure(error: unknown, env: XhsBrowserEnv): string {
+  return xhsBrowserFailureMessage(String((error as Error)?.message ?? error), env);
 }
 
 function logBrowserFailure(

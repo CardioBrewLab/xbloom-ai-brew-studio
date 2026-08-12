@@ -293,13 +293,98 @@ async function releaseQrLease(env: XhsBrowserEnv, owner: string, token: string):
     .run();
 }
 
+export type QrLeaseAcquisition =
+  | { kind: "budget-exhausted" }
+  | { kind: "busy" }
+  | { kind: "acquired"; budgetClaim: BrowserBudgetClaim; leaseToken: string };
+
+export async function acquireQrLeaseWithBudget(
+  env: XhsBrowserEnv,
+  owner: string,
+): Promise<QrLeaseAcquisition> {
+  const budgetClaim = await claimBrowserBudget(env, owner, "qr");
+  if (!budgetClaim) return { kind: "budget-exhausted" };
+  const leaseToken = await acquireQrLease(env, owner);
+  if (!leaseToken) {
+    await releaseBrowserBudget(env, budgetClaim).catch(() => {});
+    return { kind: "busy" };
+  }
+  return { kind: "acquired", budgetClaim, leaseToken };
+}
+
 async function preparePage(page: Page): Promise<void> {
   page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
   await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
   await page.setUserAgent(USER_AGENT);
 }
 
-async function launchBrowser(env: XhsBrowserEnv & { BROWSER: BrowserWorker }): Promise<Browser> {
+export function withAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("request aborted"));
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = (): void => signal.removeEventListener("abort", onAbort);
+    const onAbort = (): void => {
+      cleanup();
+      reject(signal.reason ?? new Error("request aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+async function launchBrowserWithAbort(
+  operation: Promise<Browser>,
+  signal: AbortSignal,
+): Promise<Browser> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("request aborted"));
+  let winner: "operation" | "abort" | undefined;
+  let onAbort: (() => void) | undefined;
+  const abort = new Promise<never>((_, reject) => {
+    onAbort = () => {
+      if (!winner) winner = "abort";
+      reject(signal.reason ?? new Error("request aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  const completed = operation.then(
+    (browser) => {
+      if (!winner) winner = "operation";
+      return browser;
+    },
+    (error) => {
+      if (!winner) winner = "operation";
+      throw error;
+    },
+  );
+  try {
+    return await Promise.race([completed, abort]);
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+    if (winner !== "operation") {
+      void completed.then(
+        (browser) => browser.close().catch(() => {}),
+        () => {},
+      );
+    }
+  }
+}
+
+async function sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+  await withAbort(new Promise<void>((resolve) => setTimeout(resolve, ms)), signal);
+}
+
+async function launchBrowser(
+  env: XhsBrowserEnv & { BROWSER: BrowserWorker },
+  signal = new AbortController().signal,
+): Promise<Browser> {
   const waitForAcquisition = async (fallbackMs: number): Promise<void> => {
     let waitMs = fallbackMs;
     try {
@@ -310,20 +395,26 @@ async function launchBrowser(env: XhsBrowserEnv & { BROWSER: BrowserWorker }): P
       // limits 端点自身异常时仍保留一次普通 launch，避免探测失败阻断功能。
     }
     if (waitMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, Math.min(waitMs, 20_000)));
+      await sleepWithAbort(Math.min(waitMs, 20_000), signal);
     }
   };
 
   await waitForAcquisition(0);
   try {
-    return await puppeteer.launch(env.BROWSER, { keep_alive: BROWSER_KEEP_ALIVE_MS });
+    return await launchBrowserWithAbort(
+      puppeteer.launch(env.BROWSER, { keep_alive: BROWSER_KEEP_ALIVE_MS }),
+      signal,
+    );
   } catch (error) {
     // 官方 limits 返回下一次允许 acquisition 的等待时间；按该窗口补一次。
     await waitForAcquisition(2_000);
     try {
-      return await puppeteer.launch(env.BROWSER, { keep_alive: BROWSER_KEEP_ALIVE_MS });
+      return await launchBrowserWithAbort(
+        puppeteer.launch(env.BROWSER, { keep_alive: BROWSER_KEEP_ALIVE_MS }),
+        signal,
+      );
     } catch {
-      throw error;
+      throw signal.aborted ? (signal.reason ?? error) : error;
     }
   }
 }
@@ -406,6 +497,18 @@ export function hasXhsAuthenticatedCookies(
     cookies.filter((cookie) => cookie.value.trim()).map((cookie) => cookie.name.toLowerCase()),
   );
   return names.has("a1") && names.has("webid") && names.has("web_session");
+}
+
+export function hasXhsAuthenticatedPageSignal(
+  cookies: ReadonlyArray<{ name: string; value: string }>,
+  selectorReady: boolean,
+  stateReady: boolean,
+): boolean {
+  return (selectorReady || stateReady) && hasXhsAuthenticatedCookies(cookies);
+}
+
+export function shouldReleaseBrowserBudget(browserStarted: boolean, completed: boolean): boolean {
+  return !browserStarted && !completed;
 }
 
 /** 仅放行小红书登录接口自身返回的扫码 deeplink，避免把任意协议交给浏览器跳转。 */
@@ -581,9 +684,10 @@ async function waitForResearchCache(
   env: XhsBrowserEnv,
   owner: string,
   keyword: string,
+  signal: AbortSignal,
 ): Promise<XhsResearchResult["sources"]> {
   for (let attempt = 0; attempt < 12; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await sleepWithAbort(500, signal);
     const cached = await loadResearchCache(env, owner, keyword);
     if (cached.length > 0) return cached;
   }
@@ -662,7 +766,7 @@ async function authenticatedCookies(page: Page): Promise<CookieParam[] | null> {
   const cookies = await page.cookies(XHS_ORIGIN);
   const selectorReady = Boolean(await page.$(LOGIN_SELECTOR));
   const stateReady = await authenticatedInitialState(page).catch(() => false);
-  return selectorReady || stateReady || hasXhsAuthenticatedCookies(cookies) ? cookies : null;
+  return hasXhsAuthenticatedPageSignal(cookies, selectorReady, stateReady) ? cookies : null;
 }
 
 async function waitForAuthenticatedCookies(page: Page): Promise<CookieParam[] | null> {
@@ -675,12 +779,45 @@ async function waitForAuthenticatedCookies(page: Page): Promise<CookieParam[] | 
 }
 
 async function requestObject(request: Request): Promise<Record<string, unknown>> {
-  const text = await request.text();
-  if (text.length > 64_000) throw new Error("请求内容过长");
+  const maxBytes = 64_000;
+  const declared = Number(request.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declared) && declared > maxBytes) throw new Error("请求内容过长");
+  const text = request.body ? await readLimitedText(request.body, maxBytes) : "";
   const parsed = JSON.parse(text || "{}");
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
     throw new Error("请求格式有误");
   return parsed as Record<string, unknown>;
+}
+
+async function readLimitedText(
+  body: ReadableStream<Uint8Array>,
+  maxBytes: number,
+): Promise<string> {
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel("request body too large").catch(() => {});
+        throw new Error("请求内容过长");
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 export function xhsBrowserFailureMessage(
@@ -763,8 +900,19 @@ async function qrcode(env: XhsBrowserEnv, owner: string): Promise<Response> {
   if (beforeLease?.encrypted_cookies) {
     return json({ ok: true, online: true, alreadyLoggedIn: true });
   }
-  const leaseToken = await acquireQrLease(env, owner);
-  if (!leaseToken) {
+  const lease = await acquireQrLeaseWithBudget(env, owner);
+  if (lease.kind === "budget-exhausted") {
+    return json(
+      {
+        ok: false,
+        online: true,
+        failureKind: "service_error",
+        message: "今日云端扫码预算已用完，请明日再取码或由部署者提高 Browser Run 预算",
+      },
+      429,
+    );
+  }
+  if (lease.kind === "busy") {
     return json(
       {
         ok: false,
@@ -775,18 +923,23 @@ async function qrcode(env: XhsBrowserEnv, owner: string): Promise<Response> {
       409,
     );
   }
+  const leaseToken = lease.leaseToken;
 
   let browser: Browser | null = null;
+  let browserStarted = false;
   let keepSession = false;
-  let budgetClaim: BrowserBudgetClaim | null = null;
+  const budgetClaim = lease.budgetClaim;
+  let releaseBudget = false;
   try {
     const current = await sessionRow(env, owner);
     if (current?.encrypted_cookies) {
+      releaseBudget = true;
       return json({ ok: true, online: true, alreadyLoggedIn: true });
     }
     if (current?.qr_session_id && current.qr_expires_at > Date.now()) {
       const payload = await savedQrPayload(env, current);
       if (payload && (await browserSessionAvailable(env, current.qr_session_id))) {
+        releaseBudget = true;
         return json({
           ok: true,
           online: true,
@@ -800,19 +953,8 @@ async function qrcode(env: XhsBrowserEnv, owner: string): Promise<Response> {
     await closeBrowserSession(env, current?.qr_session_id ?? "");
     await clearQrState(env, owner);
 
-    budgetClaim = await claimBrowserBudget(env, owner, "qr");
-    if (!budgetClaim) {
-      return json(
-        {
-          ok: false,
-          online: true,
-          failureKind: "service_error",
-          message: "今日云端扫码预算已用完，请明日再取码或由部署者提高 Browser Run 预算",
-        },
-        429,
-      );
-    }
     browser = await launchBrowser(env);
+    browserStarted = true;
     const page = await browser.newPage();
     await preparePage(page);
     const qrResponsePromise = page
@@ -856,7 +998,7 @@ async function qrcode(env: XhsBrowserEnv, owner: string): Promise<Response> {
       hint: "二维码和登录态只属于当前浏览器或账号",
     });
   } catch (error) {
-    if (budgetClaim) await releaseBrowserBudget(env, budgetClaim).catch(() => {});
+    if (!browserStarted) releaseBudget = true;
     logBrowserFailure("qrcode", error);
     return json(
       {
@@ -872,6 +1014,7 @@ async function qrcode(env: XhsBrowserEnv, owner: string): Promise<Response> {
       if (keepSession) await browser.disconnect();
       else await browser.close().catch(() => {});
     }
+    if (releaseBudget) await releaseBrowserBudget(env, budgetClaim).catch(() => {});
     await releaseQrLease(env, owner, leaseToken).catch(() => {});
   }
 }
@@ -942,9 +1085,11 @@ async function cookieImport(
     return json({ ok: false, message: "今日云端登录校验预算已用完，请明日再试" }, 429);
   }
   let browser: Browser | null = null;
+  let browserStarted = false;
   let completed = false;
   try {
     browser = await launchBrowser(env);
+    browserStarted = true;
     const page = await browser.newPage();
     await preparePage(page);
     await page.setCookie(...cookies);
@@ -960,7 +1105,9 @@ async function cookieImport(
     return json({ ok: false, message: publicFailure(error, env) }, 502);
   } finally {
     await browser?.close().catch(() => {});
-    if (!completed) await releaseBrowserBudget(env, budgetClaim).catch(() => {});
+    if (shouldReleaseBrowserBudget(browserStarted, completed)) {
+      await releaseBrowserBudget(env, budgetClaim).catch(() => {});
+    }
   }
 }
 
@@ -991,6 +1138,7 @@ export async function researchXhsWithBrowser(
   env: XhsBrowserEnv,
   owner: string,
   keyword: string,
+  signal = new AbortController().signal,
 ): Promise<XhsResearchResult> {
   const empty = (message: string, expired = false): XhsResearchResult => ({
     ok: false,
@@ -1001,6 +1149,7 @@ export async function researchXhsWithBrowser(
     distilled: false,
     ...(expired ? { xhsLoginExpired: true } : {}),
   });
+  if (signal.aborted) throw signal.reason ?? new Error("request aborted");
   if (!configured(env)) return empty("云端小红书调研服务尚未启用");
   const normalizedKeyword = normalizeXhsResearchKeyword(keyword);
   if (!normalizedKeyword) return empty("本次没有可用于小红书检索的关键词");
@@ -1023,7 +1172,12 @@ export async function researchXhsWithBrowser(
   const cacheKey = await xhsResearchCacheKey(env, owner, normalizedKeyword);
   const leaseToken = await acquireResearchLease(env, cacheKey);
   if (!leaseToken) {
-    const merged = await waitForResearchCache(env, owner, normalizedKeyword).catch(() => []);
+    const merged = await waitForResearchCache(env, owner, normalizedKeyword, signal).catch(
+      (error) => {
+        if (signal.aborted) throw error;
+        return [];
+      },
+    );
     if (merged.length > 0) {
       return {
         ok: true,
@@ -1038,32 +1192,41 @@ export async function researchXhsWithBrowser(
     return empty("相同账号的同一检索正在执行，本次继续使用豆档案与模型知识生成");
   }
   let browser: Browser | null = null;
+  let browserStarted = false;
   let budgetClaim: BrowserBudgetClaim | null = null;
   let refundBudget = false;
   try {
+    if (signal.aborted) throw signal.reason ?? new Error("request aborted");
     budgetClaim = await claimBrowserBudget(env, owner, "search");
     if (!budgetClaim) {
       return empty("今日云端小红书检索预算已用完，本次继续使用豆档案与模型知识生成");
     }
-    browser = await launchBrowser(env);
-    const page = await browser.newPage();
-    await preparePage(page);
-    await page.setCookie(...cookies);
+    browser = await launchBrowser(env, signal);
+    browserStarted = true;
+    const page = await withAbort(browser.newPage(), signal);
+    await withAbort(preparePage(page), signal);
+    await withAbort(page.setCookie(...cookies), signal);
     const url = new URL(`${XHS_ORIGIN}/search_result`);
     url.searchParams.set("keyword", normalizedKeyword);
     url.searchParams.set("source", "web_explore_feed");
-    await page.goto(url.toString(), { waitUntil: "domcontentloaded" });
-    await page.waitForFunction("globalThis.__INITIAL_STATE__ !== undefined", { timeout: 25_000 });
-    const feedValue = await page.evaluate(() => {
-      const root = globalThis as unknown as {
-        __INITIAL_STATE__?: { search?: { feeds?: unknown } };
-      };
-      const raw = root.__INITIAL_STATE__?.search?.feeds as
-        { value?: unknown; _value?: unknown } | undefined;
-      return raw?.value ?? raw?._value ?? raw ?? [];
-    });
+    await withAbort(page.goto(url.toString(), { waitUntil: "domcontentloaded" }), signal);
+    await withAbort(
+      page.waitForFunction("globalThis.__INITIAL_STATE__ !== undefined", { timeout: 25_000 }),
+      signal,
+    );
+    const feedValue = await withAbort(
+      page.evaluate(() => {
+        const root = globalThis as unknown as {
+          __INITIAL_STATE__?: { search?: { feeds?: unknown } };
+        };
+        const raw = root.__INITIAL_STATE__?.search?.feeds as
+          { value?: unknown; _value?: unknown } | undefined;
+        return raw?.value ?? raw?._value ?? raw ?? [];
+      }),
+      signal,
+    );
     const sources = parseXhsSearchFeeds(feedValue);
-    const stillLoggedIn = Boolean(await waitForAuthenticatedCookies(page));
+    const stillLoggedIn = Boolean(await withAbort(waitForAuthenticatedCookies(page), signal));
     if (!stillLoggedIn && sources.length === 0) {
       await env.DB.prepare(
         "UPDATE xhs_browser_sessions SET encrypted_cookies='',nickname='',updated_at=? WHERE owner=?",
@@ -1073,7 +1236,11 @@ export async function researchXhsWithBrowser(
       return empty("小红书登录已过期，本次继续完成生成", true);
     }
     if (sources.length === 0) return empty("小红书已登录，本次关键词未检索到相关笔记");
-    await saveResearchCache(env, cacheKey, leaseToken, sources).catch(() => {});
+    await withAbort(saveResearchCache(env, cacheKey, leaseToken, sources), signal).catch(
+      (error) => {
+        if (signal.aborted) throw error;
+      },
+    );
     return {
       ok: true,
       sources,
@@ -1083,7 +1250,8 @@ export async function researchXhsWithBrowser(
       distilled: false,
     };
   } catch (error) {
-    refundBudget = true;
+    refundBudget = !browserStarted;
+    if (signal.aborted) throw error;
     logBrowserFailure("search", error);
     return empty(publicFailure(error, env));
   } finally {

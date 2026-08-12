@@ -46,6 +46,10 @@ export interface Env extends ModelSettingsEnv {
   XHS_BROWSER_QR_OWNER_DAILY_LIMIT?: string;
   XHS_BROWSER_SEARCH_OWNER_DAILY_LIMIT?: string;
   XHS_RESEARCH_CACHE_TTL_SECONDS?: string;
+  HOSTED_ITEM_OWNER_HOURLY_LIMIT?: string;
+  HOSTED_ITEM_NETWORK_HOURLY_LIMIT?: string;
+  HOSTED_ITEM_GLOBAL_HOURLY_LIMIT?: string;
+  HOSTED_ITEM_OWNER_STORAGE_LIMIT?: string;
 }
 
 interface ItemRow {
@@ -126,11 +130,57 @@ function trustedEdgeProxy(request: Request, env: Env): boolean {
   }
 }
 
-async function requestBody(request: Request): Promise<Record<string, unknown>> {
+const MAX_REQUEST_BODY_BYTES = 262_144;
+
+class RequestBodyTooLargeError extends Error {
+  constructor() {
+    super("请求体超过 256KB");
+    this.name = "RequestBodyTooLargeError";
+  }
+}
+
+class QuotaExceededError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "QuotaExceededError";
+  }
+}
+
+async function readRequestText(request: Request, maxBytes: number): Promise<string> {
   const declared = Number(request.headers.get("content-length") ?? 0);
-  if (declared > 262_144) throw new Error("请求体超过 256KB");
-  const text = await request.text();
-  if (text.length > 262_144) throw new Error("请求体超过 256KB");
+  if (Number.isFinite(declared) && declared > maxBytes) throw new RequestBodyTooLargeError();
+  if (!request.body) return "";
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel("request body too large").catch(() => {});
+        throw new RequestBodyTooLargeError();
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+export async function requestBody(request: Request): Promise<Record<string, unknown>> {
+  const text = await readRequestText(request, MAX_REQUEST_BODY_BYTES);
   const parsed = JSON.parse(text || "{}");
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
     throw new Error("请求体必须是 JSON 对象");
@@ -452,6 +502,8 @@ export function publicHostedFailureReason(error: unknown): string {
 
 export function publicApiError(error: unknown): { status: number; message: string } {
   const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof RequestBodyTooLargeError) return { status: 413, message };
+  if (error instanceof QuotaExceededError) return { status: 429, message };
   if (error instanceof SyntaxError) return { status: 400, message: "请求体不是有效的 JSON" };
   if (/^请先登录|登录已过期/.test(message)) return { status: 401, message };
   if (/登录尝试较多|额度已用完|次数已到/.test(message)) {
@@ -764,6 +816,65 @@ async function incrementQuota(env: Env, subject: string, bucket: string): Promis
   return row?.request_count ?? 0;
 }
 
+function positiveHostedLimit(value: string | undefined, fallback: number, cap: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, cap) : fallback;
+}
+
+export function hostedItemQuotaPolicy(
+  env: Pick<
+    Env,
+    | "HOSTED_ITEM_OWNER_HOURLY_LIMIT"
+    | "HOSTED_ITEM_NETWORK_HOURLY_LIMIT"
+    | "HOSTED_ITEM_GLOBAL_HOURLY_LIMIT"
+    | "HOSTED_ITEM_OWNER_STORAGE_LIMIT"
+  >,
+) {
+  return {
+    ownerHourlyLimit: positiveHostedLimit(env.HOSTED_ITEM_OWNER_HOURLY_LIMIT, 240, 10_000),
+    networkHourlyLimit: positiveHostedLimit(env.HOSTED_ITEM_NETWORK_HOURLY_LIMIT, 600, 50_000),
+    globalHourlyLimit: positiveHostedLimit(env.HOSTED_ITEM_GLOBAL_HOURLY_LIMIT, 10_000, 1_000_000),
+    ownerStorageLimit: positiveHostedLimit(env.HOSTED_ITEM_OWNER_STORAGE_LIMIT, 500, 10_000),
+  };
+}
+
+export async function enforceItemWriteQuota(
+  env: Env,
+  request: Request,
+  owner: string,
+  kind: "recipe" | "bean",
+  createsItem = false,
+): Promise<void> {
+  const policy = hostedItemQuotaPolicy(env);
+  if (createsItem) {
+    const row = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM user_items WHERE owner=? AND kind=?",
+    )
+      .bind(owner, kind)
+      .first<{ count: number | string }>();
+    if (Number(row?.count ?? 0) >= policy.ownerStorageLimit) {
+      throw new QuotaExceededError("当前账户的本地档案数量已达到上限");
+    }
+  }
+
+  const bucket = `items:${new Date().toISOString().slice(0, 13)}`;
+  const subjects = await generationQuotaSubjects(request, env.APP_SESSION_SECRET);
+  const [ownerCount, networkCount, globalCount] = await Promise.all([
+    incrementQuota(env, `item-owner:${owner}`, bucket),
+    incrementQuota(env, `item-${subjects.network}`, bucket),
+    incrementQuota(env, `item-${subjects.global}`, bucket),
+  ]);
+  if (ownerCount > policy.ownerHourlyLimit) {
+    throw new QuotaExceededError("当前账户的写入请求过多，请稍后再试");
+  }
+  if (networkCount > policy.networkHourlyLimit) {
+    throw new QuotaExceededError("当前网络的写入请求过多，请稍后再试");
+  }
+  if (globalCount > policy.globalHourlyLimit) {
+    throw new QuotaExceededError("站点写入配额已用完，请稍后再试");
+  }
+}
+
 async function enforceGenerationQuota(env: Env, request: Request, owner: string): Promise<void> {
   const bucket = new Date().toISOString().slice(0, 13);
   const subjects = await generationQuotaSubjects(request, env.APP_SESSION_SECRET);
@@ -772,9 +883,11 @@ async function enforceGenerationQuota(env: Env, request: Request, owner: string)
     incrementQuota(env, subjects.network, bucket),
     incrementQuota(env, subjects.global, bucket),
   ]);
-  if (globalCount > 500) throw new Error("站点本小时生成额度已用完，请稍后继续");
-  if (networkCount > 60) throw new Error("当前网络本小时生成次数已到 60 次，请稍后继续");
-  if (browserCount > 20) throw new Error("本浏览器本小时生成次数已到 20 次，请稍后继续");
+  if (globalCount > 500) throw new QuotaExceededError("站点本小时生成额度已用完，请稍后继续");
+  if (networkCount > 60)
+    throw new QuotaExceededError("当前网络本小时生成次数已到 60 次，请稍后继续");
+  if (browserCount > 20)
+    throw new QuotaExceededError("本浏览器本小时生成次数已到 20 次，请稍后继续");
 }
 
 interface HostedResearchPacket {
@@ -1073,7 +1186,7 @@ async function generate(
               : description.slice(0, 80);
           send({ type: "research", stage: "start", query: keyword });
           researchStarted = true;
-          research = await researchXhsWithBrowser(env, owner, keyword);
+          research = await researchXhsWithBrowser(env, owner, keyword, generationSignal);
         }
         emitHostedResearch(send, mode, body, description, research, researchStarted);
         let outcomes = await generateHostedCandidates({
@@ -1160,6 +1273,33 @@ async function generate(
     },
     { clientSignal: request.signal },
   );
+}
+
+export async function parseHostedBeanRequest(
+  request: Request,
+  env: Env,
+  owner: string,
+  user: AuthUser | null,
+): Promise<Response> {
+  const body = await requestBody(request);
+  const text = typeof body.text === "string" ? body.text.trim() : "";
+  if (!text || text.length > 8_000)
+    return json({ ok: false, error: "请填写 1-8000 字的咖啡豆信息" }, 400);
+  const connection = await modelConnectionForUser(env, user);
+  if (!connection) return json({ ok: false, message: "请先登录并完成模型连接配置" }, 409);
+  await enforceGenerationQuota(env, request, owner);
+  try {
+    const extraction = await parseHostedBeanInfo(env, user, text, request.signal);
+    return json({ ok: true, ...extraction });
+  } catch (error) {
+    const raw = String((error as Error)?.message ?? error);
+    const reason = raw.startsWith("请先登录")
+      ? raw
+      : publicHostedFailureReason(error) === "模型接口本次未返回可用配方"
+        ? "模型接口本次未返回可用豆信息"
+        : publicHostedFailureReason(error);
+    return json({ ok: false, error: `豆信息解析未完成：${reason}` });
+  }
 }
 
 async function routeApi(request: Request, env: Env, identity: RequestIdentity): Promise<Response> {
@@ -1263,6 +1403,7 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
     const parent = parentItem ? { id: parentId!, value: parentItem.value } : null;
     if (sourceFeedbackId) body.sourceFeedbackId = sourceFeedbackId;
     const value = savedRecipeValue(body, normalized.recipe, parent);
+    await enforceItemWriteQuota(env, request, identity.owner, "recipe", true);
     // Atomic first-write-wins: concurrent retries share one row and later payloads never overwrite it.
     const inserted = await insertItemIfAbsent(env, identity.owner, "recipe", id, createdAt, value);
     if (!inserted) {
@@ -1329,6 +1470,7 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
       normalizedPatch = { beanId };
     }
 
+    await enforceItemWriteQuota(env, request, identity.owner, "recipe");
     const updated = await mutateItem(env, identity.owner, "recipe", recipeMatch[1], (current) => {
       const nextValue = { ...current, ...normalizedPatch };
       if (hasBeanPatch && normalizedPatch.beanId === "") delete nextValue.beanId;
@@ -1363,6 +1505,7 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
       createdAt: new Date().toISOString(),
       ...parsed.data,
     };
+    await enforceItemWriteQuota(env, request, identity.owner, "recipe");
     let updated: Record<string, unknown> | null;
     try {
       updated = await mutateItem(env, identity.owner, "recipe", feedbackMatch[1], (current) => {
@@ -1393,6 +1536,7 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
     ) {
       return json({ ok: false, message: "结果配方与当前反馈的版本链不匹配" }, 400);
     }
+    await enforceItemWriteQuota(env, request, identity.owner, "recipe");
     let feedbackFound = false;
     const updated = await mutateItem(
       env,
@@ -1430,6 +1574,7 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
         },
         400,
       );
+    await enforceItemWriteQuota(env, request, identity.owner, "bean", true);
     const id = crypto.randomUUID();
     const createdAt = new Date().toISOString();
     await putItem(env, identity.owner, "bean", id, createdAt, parsed.data);
@@ -1446,22 +1591,7 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
     return json({ ok: true, recommendations, fallback: true });
   }
   if (request.method === "POST" && path === "/api/beans/parse") {
-    const body = await requestBody(request);
-    const text = typeof body.text === "string" ? body.text.trim() : "";
-    if (!text || text.length > 8_000)
-      return json({ ok: false, error: "请粘贴 1-8000 字的咖啡豆信息" }, 400);
-    try {
-      const extraction = await parseHostedBeanInfo(env, identity.user, text, request.signal);
-      return json({ ok: true, ...extraction });
-    } catch (error) {
-      const raw = String((error as Error)?.message ?? error);
-      const reason = raw.startsWith("请先登录")
-        ? raw
-        : publicHostedFailureReason(error) === "模型接口本次未返回可用配方"
-          ? "模型接口本次未返回可用豆信息"
-          : publicHostedFailureReason(error);
-      return json({ ok: false, error: `豆信息解析未完成：${reason}` });
-    }
+    return parseHostedBeanRequest(request, env, identity.owner, identity.user);
   }
   const beanMatch = path.match(/^\/api\/beans\/([0-9a-f-]+)$/i);
   if (beanMatch && request.method === "DELETE") {
@@ -1480,6 +1610,7 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
         },
         400,
       );
+    await enforceItemWriteQuota(env, request, identity.owner, "bean");
     const value = await mutateItem(env, identity.owner, "bean", beanMatch[1], (current) => {
       const next = { ...current };
       for (const [key, entry] of Object.entries(parsed.data)) {
@@ -1497,6 +1628,7 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
     const grams = Number(body.grams);
     if (!Number.isFinite(grams) || grams <= 0 || grams > 200)
       return json({ ok: false, message: "单次用豆量需在 0-200g 之间" }, 400);
+    await enforceItemWriteQuota(env, request, identity.owner, "bean");
     let remainingGrams = 0;
     const value = await mutateItem(env, identity.owner, "bean", consumeMatch[1], (current) => {
       if (typeof current.stockGrams !== "number") throw new Error("豆档案尚未录入库存");

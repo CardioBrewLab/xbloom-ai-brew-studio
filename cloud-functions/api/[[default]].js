@@ -14,6 +14,38 @@ function jsonError(message, status) {
   });
 }
 
+const MAX_API_BODY_BYTES = 262144;
+
+function limitBody(body, maxBytes, onExceeded) {
+  const reader = body.getReader();
+  let total = 0;
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+          return;
+        }
+        const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+        total += chunk.byteLength;
+        if (total > maxBytes) {
+          onExceeded();
+          await reader.cancel("request body too large").catch(() => {});
+          controller.error(new Error("request body too large"));
+          return;
+        }
+        controller.enqueue(chunk);
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
 function sameOriginMutation(request) {
   if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return true;
   const origin = request.headers.get("origin");
@@ -41,6 +73,9 @@ export default async function onRequest(context) {
   ) {
     return jsonError("站点后端连接参数尚未配置完整", 503);
   }
+  const declared = Number(request.headers.get("content-length") || 0);
+  if (Number.isFinite(declared) && declared > MAX_API_BODY_BYTES)
+    return jsonError("API 请求体过大", 413);
 
   const incoming = new URL(request.url);
   if (!sameOriginMutation(request)) {
@@ -63,16 +98,24 @@ export default async function onRequest(context) {
   headers.set("x-forwarded-proto", "https");
 
   const hasBody = request.method !== "GET" && request.method !== "HEAD";
+  let bodyTooLarge = false;
+  const body =
+    hasBody && request.body
+      ? limitBody(request.body, MAX_API_BODY_BYTES, () => {
+          bodyTooLarge = true;
+        })
+      : null;
   const init = {
     method: request.method,
     headers,
     redirect: "manual",
-    ...(hasBody ? { body: request.body, duplex: "half" } : {}),
+    ...(hasBody ? { body, duplex: "half" } : {}),
   };
   let upstream;
   try {
     upstream = await fetch(target, init);
   } catch {
+    if (bodyTooLarge) return jsonError("API 请求体过大", 413);
     return jsonError("云端后端连接暂时不可用", 502);
   }
   const responseHeaders = new Headers(upstream.headers);

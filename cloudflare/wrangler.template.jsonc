@@ -10,6 +10,9 @@
     "run_worker_first": ["/api/*"],
     "not_found_handling": "single-page-application",
   },
+  "browser": {
+    "binding": "BROWSER",
+  },
   "d1_databases": [
     {
       "binding": "DB",
@@ -22,6 +25,9 @@
     // Leave blank for account-owned BYOK. A deployer-wide guest model is optional.
     "LLM_BASE_URL": "https://YOUR_OPENAI_COMPATIBLE_HOST/v1",
     "LLM_MODEL": "YOUR_MODEL_ID",
+    // Free-tier guardrails. Raise these after confirming the current Browser Run plan.
+    "XHS_BROWSER_QR_DAILY_LIMIT": "6",
+    "XHS_BROWSER_SEARCH_DAILY_LIMIT": "20",
   },
   "observability": {
     "enabled": true,

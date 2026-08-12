@@ -166,6 +166,12 @@ async function migrateAnonymousItems(
        SELECT ?,kind,id,created_at,json FROM user_items WHERE owner=?`,
     ).bind(target, anonymousOwner),
     env.DB.prepare("DELETE FROM user_items WHERE owner=?").bind(anonymousOwner),
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO xhs_browser_sessions(owner,encrypted_cookies,nickname,qr_session_id,qr_expires_at,updated_at)
+       SELECT ?,encrypted_cookies,nickname,qr_session_id,qr_expires_at,updated_at
+         FROM xhs_browser_sessions WHERE owner=?`,
+    ).bind(target, anonymousOwner),
+    env.DB.prepare("DELETE FROM xhs_browser_sessions WHERE owner=?").bind(anonymousOwner),
   ]);
 }
 

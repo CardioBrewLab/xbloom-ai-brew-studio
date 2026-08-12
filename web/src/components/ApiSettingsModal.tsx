@@ -12,6 +12,7 @@ import {
   type LlmSettingsDraft,
 } from "../lib/llm-settings.js";
 import { btnGhost, btnPrimary, Field, inputCls, Modal, Spinner } from "./ui.js";
+import ModelChoice from "./ModelChoice.js";
 
 const EMPTY_DRAFT: LlmSettingsDraft = {
   baseUrl: "",
@@ -283,22 +284,20 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
             <div className="min-w-0 flex-1">
               <Field
                 label="主模型"
-                hint={detectedModels.length ? "从接口实时读取" : "可手动填写模型 ID"}
+                hint={
+                  detectedModels.length
+                    ? `接口返回 ${detectedModels.length} 个模型`
+                    : "可手动填写模型 ID"
+                }
               >
-                <input
+                <ModelChoice
                   value={draft.model}
-                  onChange={(event) => updateDraft("model", event.target.value)}
+                  onChange={(value) => updateDraft("model", value)}
+                  models={detectedModels}
                   disabled={detecting || saving}
                   placeholder="先识别模型，或手动输入"
-                  spellCheck={false}
-                  list="xbloom-model-options"
-                  className={`${inputCls} font-mono text-xs`}
+                  testId="primary-model"
                 />
-                <datalist id="xbloom-model-options">
-                  {detectedModels.map((model) => (
-                    <option key={model} value={model} />
-                  ))}
-                </datalist>
               </Field>
             </div>
             <button
@@ -322,23 +321,25 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
             </summary>
             <div className="space-y-4 border-t border-[var(--line)] bg-[var(--bg-card)] p-4">
               <Field label="第二模型" hint="留空关闭">
-                <input
+                <ModelChoice
                   value={draft.fallbackModel}
-                  onChange={(event) => updateDraft("fallbackModel", event.target.value)}
+                  onChange={(value) => updateDraft("fallbackModel", value)}
+                  models={detectedModels}
                   disabled={detecting || saving}
                   placeholder="备用模型名称"
-                  spellCheck={false}
-                  className={`${inputCls} font-mono text-xs`}
+                  allowEmpty
+                  testId="fallback-model"
                 />
               </Field>
               <Field label="第三模型" hint="留空关闭">
-                <input
+                <ModelChoice
                   value={draft.thirdModel}
-                  onChange={(event) => updateDraft("thirdModel", event.target.value)}
+                  onChange={(value) => updateDraft("thirdModel", value)}
+                  models={detectedModels}
                   disabled={detecting || saving}
                   placeholder="第三模型名称"
-                  spellCheck={false}
-                  className={`${inputCls} font-mono text-xs`}
+                  allowEmpty
+                  testId="third-model"
                 />
               </Field>
               <Field

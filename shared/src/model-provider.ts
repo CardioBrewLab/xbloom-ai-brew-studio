@@ -225,7 +225,94 @@ function normalizeModelIds(values: unknown[]): string[] {
     const model = value.replace(/^models\//, "").trim();
     if (model && model.length <= 200 && !/[\r\n\0]/.test(model)) unique.add(model);
   }
-  return [...unique].sort((left, right) => left.localeCompare(right)).slice(0, 300);
+  // 兼容聚合网关的大模型池，同时给异常响应保留明确上界。
+  return [...unique].sort((left, right) => left.localeCompare(right)).slice(0, 2_000);
+}
+
+interface ModelDiscoveryPage {
+  values: unknown[];
+  nextPageToken: string;
+  nextAfterId: string;
+  hasMore: boolean;
+}
+
+function modelListValues(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
+  const record = value as Record<string, unknown>;
+  for (const key of ["data", "models", "items", "results"]) {
+    if (Array.isArray(record[key])) return record[key] as unknown[];
+  }
+  return [];
+}
+
+/**
+ * OpenAI-compatible gateways do not all mirror the official `{ data: [{ id }] }`
+ * envelope.  Keep the accepted shapes deliberately small, but include the common
+ * nested/list variants used by One API, New API and model aggregators.
+ */
+function parseModelDiscoveryPage(body: unknown): ModelDiscoveryPage {
+  if (Array.isArray(body)) {
+    return {
+      values: body.map((value) => {
+        if (typeof value === "string") return value;
+        if (!value || typeof value !== "object") return undefined;
+        const model = value as Record<string, unknown>;
+        return model.id ?? model.model ?? model.model_id ?? model.slug ?? model.name;
+      }),
+      nextPageToken: "",
+      nextAfterId: "",
+      hasMore: false,
+    };
+  }
+  if (!body || typeof body !== "object") {
+    return { values: [], nextPageToken: "", nextAfterId: "", hasMore: false };
+  }
+  const record = body as Record<string, unknown>;
+  const values = [
+    ...modelListValues(record.data),
+    ...modelListValues(record.models),
+    ...modelListValues(record.result),
+  ];
+  if (values.length === 0) values.push(...modelListValues(body));
+  return {
+    values: values.map((value) => {
+      if (typeof value === "string") return value;
+      if (!value || typeof value !== "object") return undefined;
+      const model = value as Record<string, unknown>;
+      return model.id ?? model.model ?? model.model_id ?? model.slug ?? model.name;
+    }),
+    nextPageToken:
+      typeof record.nextPageToken === "string"
+        ? record.nextPageToken
+        : typeof record.next_page_token === "string"
+          ? record.next_page_token
+          : "",
+    nextAfterId:
+      typeof record.last_id === "string"
+        ? record.last_id
+        : typeof record.lastId === "string"
+          ? record.lastId
+          : "",
+    hasMore: record.has_more === true || record.hasMore === true,
+  };
+}
+
+function discoveryPageUrl(
+  baseUrl: string,
+  provider: ModelProvider,
+  pageToken: string,
+  afterId: string,
+): string {
+  const url = new URL(endpoint(baseUrl, "models"));
+  if (provider === "gemini") {
+    url.searchParams.set("pageSize", "1000");
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+  } else if (afterId) {
+    // Anthropic 官方接口以及部分 OpenAI-compatible 聚合网关都使用该游标。
+    url.searchParams.set("after_id", afterId);
+  }
+  return url.toString();
 }
 
 export async function discoverModels(
@@ -249,52 +336,85 @@ export async function discoverModels(
   }
   // 一个识别动作共用 20 秒总预算；根地址探测最多占 5 秒，把余量留给常见的 /v1。
   const discoverySignal = combineSignal(options.signal, 20_000);
+  let bestResult: ModelDiscoveryResult | null = null;
 
   for (let index = 0; index < candidates.length; index += 1) {
     const candidateBaseUrl = candidates[index];
     const mayTryV1 = index === 0 && candidates.length > 1;
-    let response: Response;
-    try {
-      response = await fetcher(endpoint(candidateBaseUrl, "models"), {
-        method: "GET",
-        headers: authHeaders(connection),
-        signal: mayTryV1 ? combineSignal(discoverySignal, 5_000) : discoverySignal,
-      });
-    } catch (error) {
-      if (mayTryV1 && !discoverySignal.aborted) continue;
-      throw error;
-    }
-    if (!response.ok) {
-      if (mayTryV1) {
-        await response.body?.cancel().catch(() => {});
-        continue;
+    const values: unknown[] = [];
+    const seenTokens = new Set<string>();
+    let pageToken = "";
+    let afterId = "";
+    let failedCandidate = false;
+    for (let page = 0; page < 20 && values.length < 2_000; page += 1) {
+      let response: Response;
+      try {
+        response = await fetcher(discoveryPageUrl(candidateBaseUrl, provider, pageToken, afterId), {
+          method: "GET",
+          headers: authHeaders(connection),
+          signal: mayTryV1 ? combineSignal(discoverySignal, 5_000) : discoverySignal,
+        });
+      } catch (error) {
+        if (mayTryV1 && !discoverySignal.aborted) {
+          failedCandidate = true;
+          break;
+        }
+        if (bestResult) return bestResult;
+        throw error;
       }
-      throw await responseFailure(response);
-    }
+      if (!response.ok) {
+        if (mayTryV1) {
+          await response.body?.cancel().catch(() => {});
+          failedCandidate = true;
+          break;
+        }
+        if (bestResult) {
+          await response.body?.cancel().catch(() => {});
+          return bestResult;
+        }
+        throw await responseFailure(response);
+      }
 
-    let body: {
-      data?: Array<{ id?: unknown }>;
-      models?: Array<{ name?: unknown; id?: unknown }>;
-    };
-    try {
-      body = (await modelResponseJson(response, "模型列表")) as typeof body;
-    } catch (error) {
-      if (mayTryV1) continue;
-      throw error;
+      let parsed: ModelDiscoveryPage;
+      try {
+        parsed = parseModelDiscoveryPage(await modelResponseJson(response, "模型列表"));
+      } catch (error) {
+        if (mayTryV1) {
+          failedCandidate = true;
+          break;
+        }
+        if (bestResult) return bestResult;
+        throw error;
+      }
+      values.push(...parsed.values);
+      const nextToken = parsed.nextPageToken || (parsed.hasMore ? parsed.nextAfterId : "");
+      if (!nextToken || seenTokens.has(nextToken)) break;
+      seenTokens.add(nextToken);
+      pageToken = parsed.nextPageToken;
+      afterId = parsed.nextAfterId;
     }
-    const values =
-      provider === "gemini"
-        ? (body.models ?? []).map((model) => model.name ?? model.id)
-        : (body.data ?? []).map((model) => model.id);
+    if (failedCandidate) continue;
     const models = normalizeModelIds(values);
     if (models.length > 0) {
-      return { provider, baseUrl: candidateBaseUrl, models, latencyMs: Date.now() - started };
+      const candidateResult = {
+        provider,
+        baseUrl: candidateBaseUrl,
+        models,
+        latencyMs: Date.now() - started,
+      };
+      if (!bestResult || candidateResult.models.length > bestResult.models.length) {
+        bestResult = candidateResult;
+      }
+      if (index < candidates.length - 1) continue;
+      return bestResult;
     }
     if (!mayTryV1) {
+      if (bestResult) return bestResult;
       throw new Error("接口已连接，但模型列表为空；可手动填写模型 ID");
     }
   }
 
+  if (bestResult) return bestResult;
   throw new Error("接口已连接，但模型列表为空；可手动填写模型 ID");
 }
 

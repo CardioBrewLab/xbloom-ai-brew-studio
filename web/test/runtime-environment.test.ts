@@ -61,7 +61,7 @@ describe("本地助手配对配置", () => {
     assert.equal(values.has("xbloom-companion-v2"), false);
   });
 
-  it("本地助手返回 401 时清除令牌，并立即回到可重新连接的离线态", async () => {
+  it("Hosted 小红书账号直接使用同源云端接口，不依赖本地助手", async () => {
     const locationDescriptor = Object.getOwnPropertyDescriptor(globalThis, "location");
     const storageDescriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
     const originalFetch = globalThis.fetch;
@@ -85,16 +85,19 @@ describe("本地助手配对配置", () => {
       value: { hostname: "brew.example", origin: "https://brew.example" },
     });
     Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
-    globalThis.fetch = async () =>
-      new Response(JSON.stringify({ ok: false, message: "expired" }), {
-        status: 401,
+    let requested = "";
+    globalThis.fetch = async (input) => {
+      requested = String(input);
+      return new Response(JSON.stringify({ ok: true, online: true, loggedIn: false }), {
+        status: 200,
         headers: { "content-type": "application/json" },
       });
+    };
     try {
       const status = await api.xhsStatus();
-      assert.equal(status.online, false);
-      assert.equal(status.failureKind, "service_offline");
-      assert.equal(values.has("xbloom-companion-v3"), false);
+      assert.equal(status.online, true);
+      assert.equal(requested, "/api/xhs/status");
+      assert.equal(values.has("xbloom-companion-v3"), true);
     } finally {
       globalThis.fetch = originalFetch;
       if (locationDescriptor) Object.defineProperty(globalThis, "location", locationDescriptor);

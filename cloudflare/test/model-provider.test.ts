@@ -59,6 +59,104 @@ it("OpenAI 兼容模型发现使用 Bearer 和 /models", async () => {
   assert.deepEqual(result.models, ["model-a", "model-b"]);
 });
 
+it("模型发现兼容网关的 models 数组与常见模型字段", async () => {
+  const result = await discoverModels(
+    {
+      provider: "openai-compatible",
+      baseUrl: "https://gateway.example.com/v1",
+      apiKey: "TOKEN",
+    },
+    {
+      fetcher: async () =>
+        Response.json({
+          models: [{ id: "model-a" }, { model: "model-b" }, { model_id: "model-c" }, "model-d"],
+        }),
+    },
+  );
+  assert.deepEqual(result.models, ["model-a", "model-b", "model-c", "model-d"]);
+});
+
+it("网关同时返回 data 与 models 时合并全部模型", async () => {
+  const result = await discoverModels(
+    {
+      provider: "openai-compatible",
+      baseUrl: "https://gateway.example.com/v1",
+      apiKey: "TOKEN",
+    },
+    {
+      fetcher: async () =>
+        Response.json({ data: [{ id: "model-a" }], models: [{ name: "model-b" }] }),
+    },
+  );
+  assert.deepEqual(result.models, ["model-a", "model-b"]);
+});
+
+it("模型发现兼容裸数组，并保留超过 300 个的聚合网关模型池", async () => {
+  const models = Array.from({ length: 350 }, (_, index) => ({ id: `model-${index}` }));
+  const result = await discoverModels(
+    {
+      provider: "openai-compatible",
+      baseUrl: "https://gateway.example.com/v1",
+      apiKey: "TOKEN",
+    },
+    { fetcher: async () => Response.json(models) },
+  );
+  assert.equal(result.models.length, 350);
+  assert.ok(result.models.includes("model-349"));
+});
+
+it("Gemini 模型发现读取全部分页并去除 models/ 前缀", async () => {
+  const requestUrls: string[] = [];
+  const result = await discoverModels(
+    {
+      provider: "gemini",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      apiKey: "TOKEN",
+    },
+    {
+      fetcher: async (input) => {
+        const url = String(input);
+        requestUrls.push(url);
+        return url.includes("pageToken=NEXT")
+          ? Response.json({ models: [{ name: "models/gemini-b" }] })
+          : Response.json({
+              models: [{ name: "models/gemini-a" }],
+              nextPageToken: "NEXT",
+            });
+      },
+    },
+  );
+  assert.equal(requestUrls.length, 2);
+  assert.match(requestUrls[0], /pageSize=1000/);
+  assert.match(requestUrls[1], /pageToken=NEXT/);
+  assert.deepEqual(result.models, ["gemini-a", "gemini-b"]);
+});
+
+it("OpenAI 兼容网关使用 has_more/last_id 时继续读取 after_id 下一页", async () => {
+  const requestUrls: string[] = [];
+  const result = await discoverModels(
+    {
+      provider: "openai-compatible",
+      baseUrl: "https://gateway.example.com/v1",
+      apiKey: "TOKEN",
+    },
+    {
+      fetcher: async (input) => {
+        const url = String(input);
+        requestUrls.push(url);
+        return url.includes("after_id=CURSOR")
+          ? Response.json({ data: [{ id: "model-b" }], has_more: false })
+          : Response.json({ data: [{ id: "model-a" }], has_more: true, last_id: "CURSOR" });
+      },
+    },
+  );
+  assert.deepEqual(requestUrls, [
+    "https://gateway.example.com/v1/models",
+    "https://gateway.example.com/v1/models?after_id=CURSOR",
+  ]);
+  assert.deepEqual(result.models, ["model-a", "model-b"]);
+});
+
 it("OpenAI 兼容根地址遇到网页时自动尝试 /v1 并返回修正地址", async () => {
   const requestUrls: string[] = [];
   const result = await discoverModels(
@@ -84,6 +182,24 @@ it("OpenAI 兼容根地址遇到网页时自动尝试 /v1 并返回修正地址"
   ]);
   assert.equal(result.baseUrl, "https://gateway.example.com/v1");
   assert.deepEqual(result.models, ["model-a"]);
+});
+
+it("根地址与 /v1 都有效时采用模型更完整的入口", async () => {
+  const result = await discoverModels(
+    {
+      provider: "openai-compatible",
+      baseUrl: "https://gateway.example.com/",
+      apiKey: "TOKEN",
+    },
+    {
+      fetcher: async (input) =>
+        String(input).endsWith("/v1/models")
+          ? Response.json({ data: [{ id: "model-a" }, { id: "model-b" }] })
+          : Response.json({ data: [{ id: "model-a" }] }),
+    },
+  );
+  assert.equal(result.baseUrl, "https://gateway.example.com/v1");
+  assert.deepEqual(result.models, ["model-a", "model-b"]);
 });
 
 it("OpenAI 兼容根地址的首跳报错时仍在同一总预算内尝试 /v1", async () => {

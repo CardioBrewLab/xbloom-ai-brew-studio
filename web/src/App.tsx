@@ -56,7 +56,14 @@ import {
   type VariantState,
 } from "./lib/variant.js";
 import { saveCompletionIsCurrent } from "./lib/save-state.js";
-import { companionConfig, companionResearch, hostedPage } from "./lib/companion.js";
+import { hostedPage } from "./lib/companion.js";
+import {
+  INTERFACE_MODE_STORAGE_KEY,
+  readInterfaceMode,
+  resolveInterfaceMode,
+  type DeviceSignals,
+  type InterfaceMode,
+} from "./lib/interface-mode.js";
 import {
   generatedRecipeIsCurrent,
   generatedRecipeSaveOptions,
@@ -162,6 +169,38 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
+
+  // ---- 手机 / 电脑双界面：默认自动识别，用户选择会在当前浏览器持久保存。 ----
+  const [interfaceMode, setInterfaceMode] = useState<InterfaceMode>(() =>
+    readInterfaceMode(window.localStorage),
+  );
+  const [deviceRevision, setDeviceRevision] = useState(0);
+  const deviceSignals = useMemo<DeviceSignals>(
+    () => ({
+      viewportWidth: window.innerWidth,
+      userAgent: navigator.userAgent,
+      coarsePointer: window.matchMedia("(pointer: coarse)").matches,
+      maxTouchPoints: navigator.maxTouchPoints ?? 0,
+    }),
+    [deviceRevision],
+  );
+  const mobileUi = resolveInterfaceMode(interfaceMode, deviceSignals) === "mobile";
+  useEffect(() => {
+    const pointer = window.matchMedia("(pointer: coarse)");
+    const update = () => setDeviceRevision((value) => value + 1);
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+    pointer.addEventListener?.("change", update);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+      pointer.removeEventListener?.("change", update);
+    };
+  }, []);
+  useEffect(() => {
+    localStorage.setItem(INTERFACE_MODE_STORAGE_KEY, interfaceMode);
+    document.documentElement.dataset.interface = mobileUi ? "mobile" : "desktop";
+  }, [interfaceMode, mobileUi]);
 
   // ---- 页签 ----
   const [tab, setTab] = useState<AppTab>("workbench");
@@ -473,32 +512,8 @@ export default function App() {
       setGuideOpen(false); // 新一轮生成 → 关闭旧配方的引导冲煮（任务 #95）
 
       const runGeneration = async () => {
-        let payload = req;
-        if (hostedPage() && req.mode !== "fast" && companionConfig()) {
-          setResearch({
-            phase: "searching",
-            message: "正在通过本地助手整理公开资料…",
-            sources: [],
-          });
-          try {
-            const packet = await companionResearch({
-              freeText: req.beans || req.description,
-              tastingNotes: req.taste,
-            });
-            if (stale()) return;
-            payload = { ...req, researchPacket: packet };
-          } catch (reason) {
-            if (stale()) return;
-            setResearch({
-              phase: "done",
-              ok: false,
-              message: `本地调研未接入本次生成：${(reason as Error).message}`,
-              sources: [],
-            });
-          }
-        }
         await streamGenerate(
-          payload,
+          req,
           {
             onEvent: (event) => {
               if (stale()) return;
@@ -1444,7 +1459,9 @@ export default function App() {
     : "xl:grid-cols-[360px_minmax(0,1fr)_360px]";
 
   return (
-    <div className="relative min-h-screen overflow-x-hidden bg-[var(--bg-page)] text-[var(--tx-1)]">
+    <div
+      className={`relative min-h-screen overflow-x-hidden bg-[var(--bg-page)] text-[var(--tx-1)] ${mobileUi ? "pb-20" : ""}`}
+    >
       {/* 紧凑桌面栏：导航、连接状态和设置保持在单行，不挤占工作画布。 */}
       <AppHeader
         activeTab={tab}
@@ -1460,6 +1477,9 @@ export default function App() {
         onOpenAccount={() => setAccountOpen(true)}
         theme={theme}
         onToggleTheme={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+        interfaceMode={interfaceMode}
+        onInterfaceModeChange={setInterfaceMode}
+        mobileUi={mobileUi}
       />
 
       {/* 离线提示：单行浅色 banner */}
@@ -1487,7 +1507,11 @@ export default function App() {
       <ErrorBoundary>
         <main
           hidden={tab !== "workbench"}
-          className={`workbench-shell animate-fade-up grid w-full grid-cols-1 gap-4 p-4 lg:grid-cols-2 xl:gap-0 xl:p-0 ${workbenchGridClass}`}
+          className={
+            mobileUi
+              ? "workbench-shell animate-fade-up grid w-full grid-cols-1 gap-3 p-3"
+              : `workbench-shell animate-fade-up grid w-full grid-cols-1 gap-4 p-4 lg:grid-cols-2 xl:gap-0 xl:p-0 ${workbenchGridClass}`
+          }
         >
           {/* 左：输入区 */}
           <div className="workspace-column workspace-rail space-y-4">
@@ -1713,7 +1737,7 @@ export default function App() {
       {/* ============================ 其他页签 ============================ */}
       {tab === "beans" && (
         <ErrorBoundary key="beans">
-          <main className="animate-fade-up">
+          <main className={`animate-fade-up ${mobileUi ? "pb-4" : ""}`}>
             <Suspense fallback={<PageLoading label="正在打开豆库" />}>
               <BeansPage
                 beans={beans}
@@ -1732,7 +1756,7 @@ export default function App() {
 
       {tab === "cloud" && (
         <ErrorBoundary key="cloud">
-          <main className="animate-fade-up">
+          <main className={`animate-fade-up ${mobileUi ? "pb-4" : ""}`}>
             <Suspense fallback={<PageLoading label="正在打开云端配方" />}>
               <CloudPage cloud={cloud} onCloudChanged={refreshCloud} onImport={loadHistoryRecipe} />
             </Suspense>
@@ -1742,7 +1766,7 @@ export default function App() {
 
       {tab === "compare" && (
         <ErrorBoundary key="compare">
-          <main className="animate-fade-up">
+          <main className={`animate-fade-up ${mobileUi ? "pb-4" : ""}`}>
             <Suspense fallback={<PageLoading label="正在打开配方对比" />}>
               <ComparePage entries={compareEntries} theme={theme} />
             </Suspense>

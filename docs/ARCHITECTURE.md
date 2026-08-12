@@ -13,6 +13,7 @@ flowchart LR
   D1[(Cloudflare D1)]
   Model[用户选择的模型服务]
   XB[xBloom 云端]
+  XHS[Cloudflare Browser Run\n小红书]
   Companion[可选本地助手]
 
   Browser -->|本地版| Local
@@ -20,7 +21,7 @@ flowchart LR
   Worker --> D1
   Worker --> Model
   Worker --> XB
-  Browser -.->|可选本地调研| Companion
+  Worker --> XHS
   Local --> Model
   Local --> XB
   Local --> Companion
@@ -33,7 +34,7 @@ flowchart LR
 | 持久化数据  | 本地项目 data 目录和本地设置                 | 以认证用户为 key 的 D1 数据表                          |
 | 模型连接    | 用户本地 `.env` 或本地设置存储               | 账号自己的模型元数据与加密 API Key，可选部署级备用连接 |
 | xBloom 连接 | 本地账号流程和云端 API，可选 BLE             | 每个用户自己的 xBloom 云端会话和云端 API               |
-| 小红书      | 可选本地助手/MCP                             | 浏览器配对本地助手；Worker 不保存本地 Cookie 存储      |
+| 小红书      | 可选本地助手/MCP                             | Browser Run 取码与检索；Cookie 按 owner 加密保存       |
 
 ## Hosted 请求链路
 
@@ -120,22 +121,22 @@ Windows 本地版可以从本地 Cloud 页面或可选的本地环境配置填�
 
 ## 凭证和信任边界
 
-| 凭证/数据                 | 边界                                | 需要向用户说明的主要风险                              |
-| ------------------------- | ----------------------------------- | ----------------------------------------------------- |
-| 个人模型密钥              | 账号记录或本地 `.env`               | 所选模型服务会收到请求内容                            |
-| xBloom 会话               | Hosted 按用户加密记录或本地用户状态 | 部署运营者掌握 Worker/D1/密钥环境                     |
-| 小红书 Cookie             | 本地助手运行时                      | 当前电脑和浏览器配置文件属于该会话的信任边界          |
-| `APP_SESSION_SECRET`      | Cloudflare Worker 密钥              | 轮换会影响已有会话的签名上下文                        |
-| `APP_PASSWORD_PEPPER`     | Cloudflare Worker 密钥              | 账号校验值的独立 pepper；常规升级需要保持稳定         |
-| `APP_DATA_ENCRYPTION_KEY` | Cloudflare Worker 密钥              | 常规升级需要保持稳定，保证加密 API Key 与外部会话可读 |
-| `EDGE_PROXY_SECRET`       | EdgeOne 环境 + Worker 密钥          | Relay 请求需要两边的共享值一致                        |
+| 凭证/数据                 | 边界                                 | 需要向用户说明的主要风险                              |
+| ------------------------- | ------------------------------------ | ----------------------------------------------------- |
+| 个人模型密钥              | 账号记录或本地 `.env`                | 所选模型服务会收到请求内容                            |
+| xBloom 会话               | Hosted 按用户加密记录或本地用户状态  | 部署运营者掌握 Worker/D1/密钥环境                     |
+| 小红书 Cookie             | Hosted 按 owner 加密或本地助手运行时 | 部署运营者掌握 Worker/D1/密钥；不同 owner 独立        |
+| `APP_SESSION_SECRET`      | Cloudflare Worker 密钥               | 轮换会影响已有会话的签名上下文                        |
+| `APP_PASSWORD_PEPPER`     | Cloudflare Worker 密钥               | 账号校验值的独立 pepper；常规升级需要保持稳定         |
+| `APP_DATA_ENCRYPTION_KEY` | Cloudflare Worker 密钥               | 常规升级需要保持稳定，保证加密 API Key 与外部会话可读 |
+| `EDGE_PROXY_SECRET`       | EdgeOne 环境 + Worker 密钥           | Relay 请求需要两边的共享值一致                        |
 
-浏览器 Cookie 使用 `HttpOnly`，并受 Hosted 会话路径限制。本地助手使用明确的回环源站检查和配对 token。模型 API key 保存后不会由设置 API 返回。
+浏览器 Cookie 使用 `HttpOnly`，并受 Hosted 会话路径限制。模型 API key 保存后不会由设置 API 返回。Hosted 小红书只在取码、确认和检索时启动 Browser Run；状态查询读取 D1 密文状态。Windows 本地助手继续使用回环源站和本地运行时。
 
 ## 降级行为
 
 - Hosted 账号没有个人模型连接时，账号设置页面会提示配置并测试模型后再生成。
-- 可选本地助手离线时，直接生成仍可使用，小红书增强调研保持离线。
+- 小红书未登录或 Browser Run 额度暂不可用时，直接生成仍会继续；PRO/MAX 会如实显示本次调研状态。
 - 没有 xBloom 会话时，配方创建和本地保存仍可独立进行，稍后再连接 xBloom 云端。
 - 模型服务报错或超时时，接口返回错误路径，不会静默使用另一个用户的凭证。
 - 本地端口冲突时，服务会报告被占用的端口；修改本地配置中的 `PORT`/`WEB_PORT` 后重新启动。

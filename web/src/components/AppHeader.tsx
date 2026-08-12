@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AuthSession, CloudStatus } from "../lib/api.js";
+import type { InterfaceMode } from "../lib/interface-mode.js";
 import XhsAccount from "./XhsAccount.js";
 import { StatusDot } from "./ui.js";
 
@@ -26,6 +27,9 @@ export interface AppHeaderProps {
   onOpenAccount: () => void;
   theme: "dark" | "light";
   onToggleTheme: () => void;
+  interfaceMode: InterfaceMode;
+  onInterfaceModeChange: (mode: InterfaceMode) => void;
+  mobileUi: boolean;
 }
 
 /** Stable desktop chrome kept separate from the recipe orchestration component. */
@@ -43,6 +47,9 @@ export default function AppHeader({
   onOpenAccount,
   theme,
   onToggleTheme,
+  interfaceMode,
+  onInterfaceModeChange,
+  mobileUi,
 }: AppHeaderProps) {
   const tabButtonRefs = useRef<Partial<Record<AppTab, HTMLButtonElement | null>>>({});
   const [tabInk, setTabInk] = useState<{ left: number; width: number } | null>(null);
@@ -59,6 +66,86 @@ export default function AppHeader({
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
   }, [activeTab]);
+
+  if (mobileUi) {
+    return (
+      <>
+        <header className="sticky top-0 z-40 border-b border-[var(--line)] bg-[color-mix(in_srgb,var(--bg-card)_94%,transparent)] backdrop-blur-xl">
+          <div className="flex h-14 items-center justify-between gap-2 px-3">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <BrandMark />
+              <div className="min-w-0">
+                <h1 className="truncate font-display text-sm font-semibold tracking-[-0.015em] text-[var(--tx-1)]">
+                  xBloom Brew Studio
+                </h1>
+                <p className="truncate text-[10px] text-[var(--tx-3)]">
+                  {backendUp ? "服务已连接" : "服务连接中"} ·{" "}
+                  {TABS.find((tab) => tab.id === activeTab)?.label}
+                </p>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-1.5">
+              <XhsAccount expiredAlert={xhsExpired} onClearExpired={onClearXhsExpired} compact />
+              {hosted && (
+                <button
+                  type="button"
+                  onClick={onOpenAccount}
+                  aria-label={account?.authenticated ? "个人账号" : "注册或登录"}
+                  title={account?.authenticated ? account.user?.displayName : "注册或登录"}
+                  className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--line)] text-[var(--tx-2)]"
+                >
+                  <IconAccount />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onOpenSettings}
+                aria-label="模型接口设置"
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--line)] text-[var(--tx-2)]"
+              >
+                <IconSettings />
+              </button>
+            </div>
+          </div>
+          <div className="flex items-center justify-between border-t border-[var(--line)] px-3 py-1.5">
+            <span className="flex items-center gap-1.5 text-[10px] text-[var(--tx-3)]">
+              <StatusDot tone={backendUp ? "ok" : "warn"} pulse={backendUp} />
+              {cloud?.loggedIn ? "xBloom App 已登录" : "生成后上传到手机 App"}
+            </span>
+            <InterfaceModeControl value={interfaceMode} onChange={onInterfaceModeChange} compact />
+          </div>
+        </header>
+        <nav
+          aria-label="移动端主导航"
+          className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--line)] bg-[color-mix(in_srgb,var(--bg-card)_96%,transparent)] px-[max(0.5rem,env(safe-area-inset-left))] pb-[max(0.35rem,env(safe-area-inset-bottom))] pt-1 backdrop-blur-xl"
+        >
+          <div className="grid grid-cols-4 gap-1">
+            {TABS.map((tab) => {
+              const active = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => onTabChange(tab.id)}
+                  className={`flex min-h-12 flex-col items-center justify-center gap-0.5 rounded-xl text-[10px] font-medium transition-colors ${
+                    active
+                      ? "bg-[var(--acc-soft)] text-[var(--acc)]"
+                      : "text-[var(--tx-3)] active:bg-[var(--bg-inset)]"
+                  }`}
+                >
+                  <TabIcon tab={tab.id} />
+                  <span>
+                    {tab.label}
+                    {tab.id === "compare" && compareCount > 0 ? ` ${compareCount}` : ""}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </nav>
+      </>
+    );
+  }
 
   return (
     <header className="sticky top-0 z-40 border-b border-[var(--line)] bg-[color-mix(in_srgb,var(--bg-card)_92%,transparent)] backdrop-blur-xl">
@@ -153,6 +240,7 @@ export default function AppHeader({
           <span className="hidden md:block">
             <XhsAccount expiredAlert={xhsExpired} onClearExpired={onClearXhsExpired} />
           </span>
+          <InterfaceModeControl value={interfaceMode} onChange={onInterfaceModeChange} />
           {hosted && (
             <button
               type="button"
@@ -186,6 +274,97 @@ export default function AppHeader({
         </div>
       </div>
     </header>
+  );
+}
+
+function BrandMark() {
+  return (
+    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--btn-bg)] shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]">
+      <svg
+        width="16"
+        height="16"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="var(--btn-fg)"
+        strokeWidth="1.7"
+        aria-hidden
+      >
+        <path
+          d="M5 11h11v5a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4v-5zM16 12h1.5a2.5 2.5 0 0 1 0 5H16"
+          strokeLinecap="round"
+        />
+        <path
+          d="M9 7c0-1.2 1-1.5 1-2.5M12.5 7c0-1.2 1-1.5 1-2.5"
+          strokeLinecap="round"
+          opacity="0.6"
+        />
+      </svg>
+    </div>
+  );
+}
+
+function InterfaceModeControl({
+  value,
+  onChange,
+  compact = false,
+}: {
+  value: InterfaceMode;
+  onChange: (mode: InterfaceMode) => void;
+  compact?: boolean;
+}) {
+  return (
+    <label className="flex items-center gap-1.5 text-[10px] text-[var(--tx-3)]">
+      {!compact && <span className="hidden xl:inline">界面</span>}
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value as InterfaceMode)}
+        aria-label="界面版本"
+        className="h-8 rounded-lg border border-[var(--line)] bg-[var(--bg-card)] px-2 text-[11px] font-medium text-[var(--tx-2)] outline-none"
+      >
+        <option value="auto">自动</option>
+        <option value="mobile">手机版</option>
+        <option value="desktop">电脑版</option>
+      </select>
+    </label>
+  );
+}
+
+function TabIcon({ tab }: { tab: AppTab }) {
+  const paths: Record<AppTab, string> = {
+    workbench: "M4 6h16M7 3v6M17 3v6M5 11h14v9H5z",
+    beans: "M12 3c4 0 7 3 7 7s-3 9-7 11c-4-2-7-7-7-11s3-7 7-7Zm0 1c0 7-2 11-6 14",
+    cloud: "M7 18h10a4 4 0 0 0 .5-8A6 6 0 0 0 6 8a5 5 0 0 0 1 10Z",
+    compare: "M8 4H4v16h4M16 4h4v16h-4M9 8l3-3 3 3M12 5v14M9 16l3 3 3-3",
+  };
+  return (
+    <svg
+      width="17"
+      height="17"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      aria-hidden
+    >
+      <path d={paths[tab]} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function IconAccount() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      aria-hidden
+    >
+      <circle cx="12" cy="8" r="3" />
+      <path d="M5 20c.7-4 3-6 7-6s6.3 2 7 6" strokeLinecap="round" />
+    </svg>
   );
 }
 

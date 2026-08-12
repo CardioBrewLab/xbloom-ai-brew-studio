@@ -45,9 +45,13 @@
 
 中国入口使用 EdgeOne 托管前端和 API Relay，Cloudflare Worker/D1 提供 Hosted API。稳定的中国大陆地址需要已备案的自定义域名。部署变量和验收步骤见 [DEPLOY_CHINA.md](DEPLOY_CHINA.md)。
 
-### 4. 使用可选的小红书助手
+### 4. 使用网站内小红书调研
 
-Hosted 页面可以调用同一台 Windows 电脑上的本地助手进行小红书调研。点击 **Connect local assistant**，确认本地服务打开的配对窗口。助手 token 只用于本地配对流程，小红书 Cookie 保留在本地助手运行时。助手是可选项；助手离线时，基础冲煮流程仍可直接使用。
+Hosted 页面通过 Cloudflare Browser Run 直接完成小红书扫码和辅助检索。点击顶栏的小红书状态，取二维码后用手机 App 扫码；Cookie 使用 `APP_DATA_ENCRYPTION_KEY` 加密并按匿名浏览器或注册账号隔离。注册登录时，当前匿名浏览器的小红书会话会迁移到该账号。小红书登录是可选项，未登录时基础生成和 xBloom 上传照常使用。
+
+### 5. 选择手机或电脑界面
+
+默认 **自动** 模式综合手机 UA、触屏能力和视口宽度选择界面。手机版使用紧凑顶栏与底部导航，电脑版保留三栏工作台。用户可在顶栏选择 **手机版** 或 **电脑版**，偏好保存在当前浏览器。
 
 ## Windows 本地版配置
 
@@ -107,7 +111,9 @@ Windows launcher 使用以下默认值：
 
 ### 小红书和调研
 
-本地助手是可选的调研渠道。需要时启动打包的助手，把登录状态保留在当前电脑，并从工作台完成连接。Hosted 请求只通过配对后的本地 API 调用助手；Worker 不会接收本地 Cookie 存储。
+Hosted 版直接在网站内启动 Cloudflare Browser Run 取码和检索；扫码不是使用工作台的前提，登录后才会在 Pro/Max 生成中加入小红书来源。Cookie 由 Worker 使用 `APP_DATA_ENCRYPTION_KEY` 加密，并按匿名浏览器或站内账号的 owner 隔离。Windows 本地版继续使用可选的本地助手，登录状态留在当前电脑。
+
+免费部署默认每天最多启动 6 次扫码/登录校验和 20 次小红书检索，可通过 `XHS_BROWSER_QR_DAILY_LIMIT`、`XHS_BROWSER_SEARCH_DAILY_LIMIT` 调整。每个 owner 还分别限制为每天 3 次扫码和 10 次检索，避免单个访客占满站点预算。
 
 SearXNG 和 Firecrawl 是独立的调研服务。只配置当前流程需要的服务，并确认发送给每个服务的数据范围。助手或调研服务离线时，可以直接使用冲煮目标和模型连接。
 
@@ -119,7 +125,7 @@ Windows 安装器在检测到 Python 3.10+ 时，可以准备可选 BLE 设备�
 
 - **个人模型密钥**：归当前账号/用户所有，保存在账号设置或本地 `.env`。
 - **xBloom 账号**：归当前用户所有，从 Cloud 页面重新连接，不复制其他用户的会话。
-- **小红书登录**：归本地助手运行时所在的当前电脑，保留在本地。
+- **小红书登录**：Hosted 版按当前 owner 加密保存在 D1；Windows 本地版归当前电脑的助手运行时。
 - **运营方密钥**：`APP_SESSION_SECRET`、`APP_PASSWORD_PEPPER`、`APP_DATA_ENCRYPTION_KEY` 和 EdgeOne Relay 密钥属于部署运营方，保存在 Worker/EdgeOne 密钥存储中。
 
 这些值请放在对应的配置边界中，不要出现在 README 示例、截图、issue、发布压缩包或共享浏览器配置文件中。从一种运行方式切换到另一种运行方式时，在新的配置边界中重新填写凭证。

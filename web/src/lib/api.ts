@@ -13,13 +13,7 @@ import {
 import type { LlmSettingsUpdateInput } from "./llm-settings.js";
 import type { GenerationMode } from "./generation-mode.js";
 import type { XhsQrFailureKind } from "./xhs-qr.js";
-import {
-  backendConnectionErrorMessage,
-  clearCompanion,
-  companionConfig,
-  companionFetch,
-  hostedPage,
-} from "./companion.js";
+import { backendConnectionErrorMessage } from "./companion.js";
 
 // ---------------------------------------------------------------------------
 // 契约类型
@@ -252,7 +246,7 @@ export interface GenerateRequest {
   /** 基础配方在本地库的 entry id：后端据此注入该 lineage 的历史反馈 */
   baseRecipeId?: string;
   /**
-   * 常在线网页可选地从用户电脑上的本地助手取得调研素材，再随本次生成提交。
+   * Hosted 可由云端按当前 owner 检索小红书；本地版也可随请求提交本机调研素材。
    * Cookie 和配对令牌不进入该载荷；服务端只接收清洗后的摘要与公开来源。
    */
   researchPacket?: {
@@ -296,7 +290,7 @@ export interface ResearchSource {
 /** 小红书账号状态（任务 #83：/api/xhs/status 契约） */
 export interface XhsStatus {
   ok: boolean;
-  /** false = 小红书本地 MCP 服务未启动（区别于掉登录） */
+  /** false = 当前部署的小红书服务未就绪（区别于掉登录） */
   online: boolean;
   loggedIn: boolean;
   nickname?: string;
@@ -625,50 +619,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function xhsRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  if (!hostedPage()) return request<T>(path, init);
-  if (!companionConfig()) {
-    if (path === "/api/xhs/status") {
-      return {
-        ok: true,
-        online: false,
-        loggedIn: false,
-        failureKind: "service_offline",
-        message: "先连接本地助手，再使用小红书辅助调研",
-      } as T;
-    }
-    throw new ApiRequestError("请先连接本地助手", "service_offline");
-  }
-  let response: Response;
-  try {
-    response = await companionFetch(path, init);
-  } catch (error) {
-    throw new ApiRequestError((error as Error).message, "service_offline");
-  }
-  const body = await parseJson<T>(response);
-  if (response.status === 401) {
-    clearCompanion();
-    if (path === "/api/xhs/status") {
-      return {
-        ok: true,
-        online: false,
-        loggedIn: false,
-        failureKind: "service_offline",
-        message: "本地助手配对已失效，请重新连接",
-      } as T;
-    }
-    throw new ApiRequestError("本地助手配对已失效，请重新连接", "service_offline");
-  }
-  if (
-    !response.ok ||
-    (body && typeof body === "object" && (body as { ok?: unknown }).ok === false)
-  ) {
-    const value = body as { message?: string; failureKind?: XhsQrFailureKind };
-    throw new ApiRequestError(
-      value.message ?? `请求失败（HTTP ${response.status}）`,
-      value.failureKind,
-    );
-  }
-  return body;
+  return request<T>(path, init);
 }
 
 export const api = {
@@ -886,7 +837,7 @@ export const api = {
     }),
 
   // ---- 小红书账号（任务 #83） ----
-  /** 登录态探活：online:false = 本地 MCP 服务未启动（区别于掉登录） */
+  /** 登录态探活：online:false = 当前部署的小红书服务未就绪（区别于掉登录） */
   xhsStatus: () => xhsRequest<XhsStatus>("/api/xhs/status"),
   /** 获取登录二维码（base64 data URL + 失效时刻）；alreadyLoggedIn 时需先登出切号 */
   xhsQrcode: () => xhsRequest<XhsQrcode>("/api/xhs/login/qrcode", { method: "POST" }),

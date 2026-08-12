@@ -17,6 +17,7 @@ import {
 } from "./model-settings.ts";
 import { generationQuotaSubjects, sameOriginMutation } from "./session.ts";
 import { handleXbloomRoute } from "./xbloom-cloud.ts";
+import { handleXhsBrowserRoute, researchXhsWithBrowser } from "./xhs-browser.ts";
 import { createSseResponse, type SseSender } from "./sse.ts";
 
 export interface Env extends ModelSettingsEnv {
@@ -26,6 +27,9 @@ export interface Env extends ModelSettingsEnv {
   APP_PASSWORD_PEPPER: string;
   APP_DATA_ENCRYPTION_KEY?: string;
   EDGE_PROXY_SECRET?: string;
+  BROWSER?: import("@cloudflare/puppeteer").BrowserWorker;
+  XHS_BROWSER_QR_DAILY_LIMIT?: string;
+  XHS_BROWSER_SEARCH_DAILY_LIMIT?: string;
 }
 
 interface ItemRow {
@@ -512,13 +516,14 @@ function emitHostedResearch(
   body: Record<string, unknown>,
   description: string,
   research: HostedResearchPacket | null,
+  started = false,
 ): void {
   if (mode === "fast") return;
   const query =
     typeof body.beans === "string" && body.beans.trim()
       ? body.beans.trim().slice(0, 500)
       : description;
-  send({ type: "research", stage: "start", query });
+  if (!started) send({ type: "research", stage: "start", query });
   for (const source of research?.sources ?? [])
     send({ type: "research", stage: "source", ...source });
   send({
@@ -527,7 +532,7 @@ function emitHostedResearch(
     ok: research?.ok ?? false,
     message:
       research?.message ??
-      "本次使用豆档案、口味目标与用户提供的参考资料生成；连接本地助手后还可加入小红书与网页调研。",
+      "本次使用豆档案、口味目标与用户提供的参考资料生成；登录小红书后可加入站内辅助检索。",
     sources: research?.sources ?? [],
     filtered: research?.filtered ?? 0,
     distilled: research?.distilled ?? false,
@@ -730,13 +735,23 @@ async function generate(
     return json({ ok: false, message: "请填写 1-4000 字的冲煮需求" }, 400);
   const mode = body.mode === "max" ? "max" : body.mode === "pro" ? "pro" : "fast";
   const count = mode === "max" ? 3 : 1;
-  const research = mode === "fast" ? null : hostedResearchPacket(body.researchPacket);
+  let research = mode === "fast" ? null : hostedResearchPacket(body.researchPacket);
   return createSseResponse(
     async (send, clientSignal) => {
       const totalBudget = count === 3 ? HOSTED_MAX_TOTAL_BUDGET_MS : HOSTED_SINGLE_TOTAL_BUDGET_MS;
       const generationSignal = AbortSignal.any([clientSignal, AbortSignal.timeout(totalBudget)]);
       try {
-        emitHostedResearch(send, mode, body, description, research);
+        let researchStarted = false;
+        if (mode !== "fast" && !research) {
+          const keyword =
+            typeof body.beans === "string" && body.beans.trim()
+              ? body.beans.trim().slice(0, 80)
+              : description.slice(0, 80);
+          send({ type: "research", stage: "start", query: keyword });
+          researchStarted = true;
+          research = await researchXhsWithBrowser(env, owner, keyword);
+        }
+        emitHostedResearch(send, mode, body, description, research, researchStarted);
         let outcomes = await generateHostedCandidates({
           send,
           clientSignal,
@@ -831,7 +846,14 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
       ok: true,
       version: "hosted-0.2.1",
       deployment: "cloudflare",
-      capabilities: { generate: true, cloud: true, ble: false, auth: true, personalModel: true },
+      capabilities: {
+        generate: true,
+        cloud: true,
+        ble: false,
+        auth: true,
+        personalModel: true,
+        xhsBrowser: Boolean(env.BROWSER && env.APP_DATA_ENCRYPTION_KEY),
+      },
     });
   if (request.method === "GET" && path === "/api/config") {
     const settings = await publicModelSettings(env, identity.user);
@@ -1010,13 +1032,6 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
     });
   }
 
-  if (request.method === "GET" && path === "/api/xhs/status")
-    return json({
-      ok: true,
-      online: false,
-      loggedIn: false,
-      message: "小红书调研由本地完整版提供",
-    });
   if (request.method === "GET" && path === "/api/cloud/status")
     return json({ ok: true, loggedIn: false, region: "global" });
   if (request.method === "GET" && path === "/api/ble/status")
@@ -1053,8 +1068,16 @@ export default {
         : await handleModelSettingsRoute(routedRequest, env, identity.user);
       const xbloom =
         auth || settings ? null : await handleXbloomRoute(routedRequest, env, identity.user);
+      const xhs =
+        auth || settings || xbloom
+          ? null
+          : await handleXhsBrowserRoute(routedRequest, env, identity.owner);
       const response =
-        auth?.response ?? settings ?? xbloom ?? (await routeApi(routedRequest, env, identity));
+        auth?.response ??
+        settings ??
+        xbloom ??
+        xhs ??
+        (await routeApi(routedRequest, env, identity));
       const headers = new Headers(response.headers);
       for (const cookie of [...identity.cookies, ...(auth?.cookies ?? [])]) {
         headers.append("set-cookie", cookie);

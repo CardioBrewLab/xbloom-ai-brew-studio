@@ -10,7 +10,7 @@ import { api, type XhsStatus, xhsFailureKindFromError } from "../lib/api.js";
 import { xhsQrFailureCopy, type XhsQrFailureKind } from "../lib/xhs-qr.js";
 import { btnGhost, btnPrimary, btnText, Modal, Spinner, StatusDot } from "./ui.js";
 import { createPortal } from "react-dom";
-import { hostedPage, pairCompanion } from "../lib/companion.js";
+import { hostedPage } from "../lib/companion.js";
 
 /** 二维码展示态状态机 */
 type QrPhase = "idle" | "loading" | "code" | "expired" | "confirmed" | "already" | "error";
@@ -22,9 +22,11 @@ export default function XhsAccount({
   expiredAlert,
   /** 登录成功/状态恢复后清除失效警示 */
   onClearExpired,
+  compact = false,
 }: {
   expiredAlert: boolean;
   onClearExpired: () => void;
+  compact?: boolean;
 }) {
   const [status, setStatus] = useState<XhsStatus | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
@@ -47,7 +49,6 @@ export default function XhsAccount({
   const [importFailed, setImportFailed] = useState(false);
   /** 登录说明折叠态（任务 #126：已登录态默认折叠） */
   const [infoOpen, setInfoOpen] = useState(false);
-  const [pairBusy, setPairBusy] = useState(false);
   /** 状态探活与账号操作各自使用序列号，晚到响应不得覆盖新状态。 */
   const statusRequestIdRef = useRef(0);
   const operationIdRef = useRef(0);
@@ -185,19 +186,6 @@ export default function XhsAccount({
     void refreshStatus();
   };
 
-  const connectCompanion = async () => {
-    setPairBusy(true);
-    setQrError("");
-    try {
-      await pairCompanion();
-      await refreshStatus();
-    } catch (error) {
-      setQrError((error as Error).message);
-    } finally {
-      setPairBusy(false);
-    }
-  };
-
   /**
    * 任务 #99：关闭弹窗时若扫码流程仍在进行中（取码中/展示码），一并重置为 idle，
    * 让 2.5s 轮询与 1s 倒计时两个 effect 随依赖变化自然清理，不后台空转到过期。
@@ -265,14 +253,16 @@ export default function XhsAccount({
         type="button"
         onClick={openModal}
         title="小红书账号：扫码登录 / 续期 / 切换账号"
-        className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] leading-4 transition-colors duration-150 hover:bg-[var(--bg-inset)] ${
+        className={`flex items-center gap-1.5 border text-[11px] leading-4 transition-colors duration-150 hover:bg-[var(--bg-inset)] ${
+          compact ? "h-8 w-8 justify-center rounded-lg p-0" : "rounded-full px-2.5 py-1"
+        } ${
           showExpiredAlert
             ? "border-[color-mix(in_srgb,var(--bad)_45%,transparent)] text-[var(--bad)]"
             : "border-[var(--line)] text-[var(--tx-2)]"
         }`}
       >
         <StatusDot tone={badgeTone} pulse={loggedIn || showExpiredAlert} />
-        {badgeLabel}
+        <span className={compact ? "sr-only" : ""}>{badgeLabel}</span>
       </button>
 
       {modalOpen &&
@@ -314,7 +304,7 @@ export default function XhsAccount({
                   ) : !status.online ? (
                     <span className="text-[var(--tx-2)]">
                       {hostedPage()
-                        ? "网页尚未连接这台电脑上的小红书助手"
+                        ? "云端小红书浏览器暂时未启用，请稍后刷新"
                         : "小红书本地服务未启动 —— 请确认 xiaohongshu-mcp 常驻服务已运行"}
                     </span>
                   ) : loggedIn ? (
@@ -339,16 +329,6 @@ export default function XhsAccount({
                 </div>
                 {/* 动作区：登出/刷新降为 ghost 文本按钮（任务 #126），保留原 onClick */}
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-[var(--line)] px-5 py-3">
-                  {offline && hostedPage() && (
-                    <button
-                      type="button"
-                      className={btnPrimary}
-                      onClick={() => void connectCompanion()}
-                      disabled={pairBusy}
-                    >
-                      {pairBusy && <Spinner />} 连接本地助手
-                    </button>
-                  )}
                   {status?.online !== false &&
                     !loggedIn &&
                     qrPhase !== "code" &&
@@ -558,7 +538,9 @@ export default function XhsAccount({
                         {importBusy && <Spinner />} 导入并验证
                       </button>
                       <span className="text-[11px] text-[var(--tx-3)]">
-                        Cookie 仅存入本机 MCP 服务，不会上传
+                        {hostedPage()
+                          ? "Cookie 经加密后仅绑定当前站内用户"
+                          : "Cookie 仅存入本机 MCP 服务"}
                       </span>
                     </div>
                   </div>
@@ -576,7 +558,9 @@ export default function XhsAccount({
                   <div className="flex min-w-0 items-center gap-2.5">
                     <span className="eyebrow shrink-0">登录说明</span>
                     <span className="truncate text-[11px] text-[var(--tx-3)]">
-                      登录态由本地 xiaohongshu-mcp 服务保管 · 仅用于调研
+                      {hostedPage()
+                        ? "登录态按当前用户加密隔离 · 仅用于调研"
+                        : "登录态由本地 xiaohongshu-mcp 服务保管 · 仅用于调研"}
                     </span>
                   </div>
                   <svg
@@ -597,7 +581,9 @@ export default function XhsAccount({
                       <div>
                         <p className="eyebrow mb-1">服务说明</p>
                         <p className="text-[11px] leading-relaxed text-[var(--tx-2)]">
-                          登录态由本地 xiaohongshu-mcp 服务保管，仅用于调研检索，不会发布任何内容。
+                          {hostedPage()
+                            ? "登录态由云端按当前浏览器或站内账号加密隔离，仅用于调研检索，不会发布任何内容。"
+                            : "登录态由本地 xiaohongshu-mcp 服务保管，仅用于调研检索，不会发布任何内容。"}
                           若在其他设备登录同一账号，可能会互踢下线，届时在此重新扫码即可。
                         </p>
                       </div>

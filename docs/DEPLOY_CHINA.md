@@ -4,9 +4,9 @@
 
 - **EdgeOne Makers**：返回 `web/dist` 静态界面，并由 Cloud Function 接收 `/api/*`；
 - **Cloudflare Pages Relay**：解决 EdgeOne 到 `workers.dev` 的网络兼容问题，只透传 API；
-- **Cloudflare Worker + D1**：注册登录、账号隔离、模型 API Key 与 xBloom 凭据加密、豆仓、历史、生成和 xBloom 云端上传。
+- **Cloudflare Worker + D1 + Browser Run**：注册登录、账号隔离、模型 API Key/xBloom/小红书凭据加密、豆仓、历史、生成、xBloom 云端上传和小红书辅助检索。
 
-电脑关机后两层仍由云平台运行。每位用户登录自己的工作台账号，再保存自己的模型接口与 xBloom 账号；小红书是可选的本地助手，Cookie 留在用户电脑。
+电脑关机后各层仍由云平台运行。每位用户登录自己的工作台账号，再保存自己的模型接口与 xBloom 账号；小红书可直接在网站扫码，Cookie 按匿名浏览器或注册账号加密隔离。
 
 ## 1. 先部署 Worker
 
@@ -67,7 +67,7 @@ npm run check:hosted-url -- https://YOUR_PUBLIC_DOMAIN/
 ## 5. 费用边界
 
 - 默认不设置部署者的 `LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_MODEL`；用户登录后填写自己的模型连接，模型费用归用户自己的供应商账号；
-- EdgeOne Makers、Cloudflare Pages、Workers 和 D1 都可从免费套餐开始；达到免费额度后按各平台当期规则限流或升级；
+- EdgeOne Makers、Cloudflare Pages、Workers、D1 和 Browser Run 都可从免费套餐开始；Browser Run 免费计划当前为每日 10 分钟、最多 3 个并发浏览器，公开运营前按官方当期额度评估；
 - 域名购买及中国大陆节点所需的备案由部署者自行处理。
 
 ## 6. 验收
@@ -79,7 +79,8 @@ npm run check:hosted-url -- https://YOUR_PUBLIC_DOMAIN/
 3. A 账号创建豆档案/配方，B 账号列表保持独立；
 4. FAST、PRO、MAX 各生成一次，MAX 三份参数快照应互不重复；
 5. 登录个人 xBloom 账号，执行发布预演、上传和列表回读；
-6. 小红书不登录时生成照常；连接本地助手后，PRO/MAX 显示公开来源与小红书状态。
+6. 小红书不登录时生成照常；网站内扫码后，PRO/MAX 显示真实笔记来源与小红书状态。
+7. 用手机和电脑各打开一次：手机应自动显示底部导航，电脑应显示三栏工作台；手动版本切换可持久保存。
 
 额外执行自动化门禁：
 

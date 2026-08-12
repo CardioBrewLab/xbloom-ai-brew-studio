@@ -8,7 +8,7 @@
 - 个人 BYOK 模型设置，支持 OpenAI/GPT、Claude、Kimi、DeepSeek、Qwen、Gemini 和自定义 OpenAI-compatible 端点。
 - 保存个人模型设置前进行模型发现和连接测试。
 - 每个用户独立的 xBloom 云端登录、配方上传和配方管理。
-- Hosted 用户可选的本地小红书助手。
+- Hosted 用户的网站内小红书扫码、按用户加密会话和辅助调研。
 - EdgeOne 前端/API Relay 加 Cloudflare Worker/D1 的中国入口。
 - Windows 本地安装包，包含项目内运行时、本地 data、可选调研工具和可选 BLE 设置。
 
@@ -86,7 +86,8 @@ npm run check:hosted-url -- https://YOUR_PUBLIC_DOMAIN/
 | 模型设置                          | 用户填写个人端点/密钥，并完成发现、测试和保存                                         |
 | 生成                              | FAST/PRO/MAX 按当前模型生成预期的结构化配方                                           |
 | xBloom 云端                       | 用户从 Cloud 页面登录并上传/管理配方                                                  |
-| 可选本地助手                      | 本地配对需要明确确认；停止助手后基础冲煮流程仍可使用                                  |
+| Hosted 小红书                     | 两个账号分别扫码/退出，确认 Cookie、昵称与调研来源不串号                              |
+| 手机/电脑界面                     | 手机 UA 自动显示移动导航；电脑显示三栏；手动覆盖刷新后保持                            |
 | 可选 BLE                          | Python/设备设置与 xBloom 云端上传流程分开                                             |
 | 停止                              | `stop-xbloom.bat` 停止本地服务；再次启动可以恢复本地流程                              |
 | 卸载/清理                         | 发布说明明确列出本地 data、`.env`、`.runtime`、助手状态和桌面快捷方式等用户自行管理项 |
@@ -108,7 +109,7 @@ npm run check:hosted-url -- https://YOUR_PUBLIC_DOMAIN/
 | 生成          | 每个账号使用自己的模型设置；共享模型（guest model）只覆盖未配置个人模型的账号 |
 | 退出/会话     | 退出当前浏览器会话，不影响另一个账号                                          |
 | 中国 Relay    | EdgeOne 可以把 API、Cookie 和流式路径转发到 Worker                            |
-| 可选本地助手  | 配对限制在回环本地服务，不把 Cookie 存储暴露给 D1                             |
+| Hosted 小红书 | D1 只保存 AES-GCM 密文；二维码会话和 Cookie 均以 owner 隔离                   |
 
 ## 发布流程
 

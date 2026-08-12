@@ -5,6 +5,7 @@
  * 所有类型严格按统一 API 契约声明。
  */
 import { RecipeSchema, type Recipe } from "./recipe-schema.js";
+import { TASTE_TAGS } from "../../../shared/dist/data-schema.js";
 import {
   createClientPasswordParams,
   deriveClientPasswordProof,
@@ -14,6 +15,7 @@ import type { LlmSettingsUpdateInput } from "./llm-settings.js";
 import type { GenerationMode } from "./generation-mode.js";
 import type { XhsQrFailureKind } from "./xhs-qr.js";
 import { backendConnectionErrorMessage } from "./companion.js";
+import { createAbortScope } from "./abort.js";
 
 // ---------------------------------------------------------------------------
 // 契约类型
@@ -113,6 +115,8 @@ export interface CloudStatus {
   workspaceLoginRequired?: boolean;
   /** 后端 .env 配置了凭据，具备自动登录能力 */
   autoLogin?: boolean;
+  /** Hosted 版只保存加密会话令牌，登录密码不落库。 */
+  passwordStored?: boolean;
   /** 当前登录账号邮箱（已登录时返回） */
   email?: string;
   region?: "cn" | "global";
@@ -203,16 +207,7 @@ export interface SavedFeedback extends BrewFeedback {
   resultingRecipeId?: string;
 }
 
-export const TASTE_TAGS = [
-  "偏酸",
-  "偏苦",
-  "偏弱",
-  "过强",
-  "平衡",
-  "香气不足",
-  "风味不突出",
-  "甜感不足",
-] as const;
+export { TASTE_TAGS };
 
 /** 云端账号配方条目 */
 export interface CloudRecipeEntry {
@@ -583,27 +578,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const isCloud = path.startsWith("/api/cloud/");
   const isXhsQr = path === "/api/xhs/login/qrcode";
   const isXhsPoll = path === "/api/xhs/login/poll";
-  const timeoutMs = isCloud ? 60_000 : isXhsQr ? 25_000 : isXhsPoll ? 22_000 : 0;
-  const signals: AbortSignal[] = [];
-  if (init?.signal) signals.push(init.signal);
-  if (timeoutMs > 0) signals.push(AbortSignal.timeout(timeoutMs));
-  const signal =
-    signals.length === 1 ? signals[0] : signals.length > 1 ? AbortSignal.any(signals) : undefined;
+  const timeoutMs = isCloud ? 60_000 : isXhsQr ? 25_000 : isXhsPoll ? 22_000 : 45_000;
+  const abortScope = createAbortScope([init?.signal], timeoutMs);
   let res: Response;
   try {
     res = await fetch(path, {
       headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
       ...init,
-      ...(signal ? { signal } : {}),
+      signal: abortScope.signal,
     });
   } catch (e) {
-    if (isCloud && (e as Error)?.name === "TimeoutError") {
+    if (isCloud && abortScope.timedOut()) {
       throw new Error("云端请求超过 60 秒未响应（可能后端正在热重载或网络异常），请重试");
     }
-    if ((isXhsQr || isXhsPoll) && (e as Error)?.name === "TimeoutError") {
+    if ((isXhsQr || isXhsPoll) && abortScope.timedOut()) {
       throw new ApiRequestError("小红书登录窗口响应超时，请稍后重试", "browser_timeout");
     }
+    if (abortScope.timedOut()) {
+      throw new Error("请求超过 45 秒未响应，请检查网络后重试");
+    }
     throw new Error(backendConnectionErrorMessage(location.hostname));
+  } finally {
+    abortScope.cleanup();
   }
   if (!res.ok) {
     let msg = `请求失败（HTTP ${res.status}）`;
@@ -897,15 +893,24 @@ export interface ParseBeanInfoResult {
  * 由调用方（BeanForm 状态机）自行分流 done / error 态。
  */
 export async function parseBeanInfo(text: string): Promise<ParseBeanInfoResult> {
+  const abortScope = createAbortScope([], 45_000);
   let res: Response;
   try {
     res = await fetch("/api/beans/parse", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
+      signal: abortScope.signal,
     });
   } catch {
-    return { ok: false, error: "无法连接后端服务，请确认 server 已启动" };
+    return {
+      ok: false,
+      error: abortScope.timedOut()
+        ? "豆信息解析等待超时，请稍后重试"
+        : backendConnectionErrorMessage(location.hostname),
+    };
+  } finally {
+    abortScope.cleanup();
   }
   try {
     const body = (await res.json()) as ParseBeanInfoResult;
@@ -1015,22 +1020,44 @@ export async function streamGenerate(
   callbacks: StreamCallbacks,
   signal?: AbortSignal,
 ): Promise<void> {
+  const watchdog = new AbortController();
+  const abortScope = createAbortScope([signal, watchdog.signal]);
+  const totalTimer = setTimeout(() => watchdog.abort(new Error("生成总时长超过 190 秒")), 190_000);
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const touchIdleTimer = (): void => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => watchdog.abort(new Error("生成流超过 75 秒没有新进度")), 75_000);
+  };
+  const clearWatchdogs = (): void => {
+    clearTimeout(totalTimer);
+    if (idleTimer) clearTimeout(idleTimer);
+    abortScope.cleanup();
+  };
+  touchIdleTimer();
   let res: Response;
   try {
     res = await fetch("/api/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-      signal,
+      signal: abortScope.signal,
     });
   } catch (err) {
+    clearWatchdogs();
+    if (signal?.aborted) return;
+    if (watchdog.signal.aborted) {
+      callbacks.onError("生成等待时间过长，已保留当前页面状态；请重试本次请求");
+      callbacks.onDone();
+      return;
+    }
     if ((err as Error).name === "AbortError") return;
-    callbacks.onError("无法连接后端服务，请确认 server 已启动（npm run dev）");
+    callbacks.onError(backendConnectionErrorMessage(location.hostname));
     callbacks.onDone();
     return;
   }
 
   if (!res.ok) {
+    clearWatchdogs();
     let msg = `生成失败（HTTP ${res.status}）`;
     try {
       const body = (await res.json()) as { error?: string; message?: string };
@@ -1045,6 +1072,7 @@ export async function streamGenerate(
 
   const contentType = res.headers.get("content-type") ?? "";
   if (!contentType.includes("text/event-stream")) {
+    clearWatchdogs();
     try {
       const body = (await res.json()) as { recipe?: Recipe; clamped?: string[] };
       if (body.recipe) {
@@ -1060,6 +1088,7 @@ export async function streamGenerate(
   }
 
   if (!res.body) {
+    clearWatchdogs();
     callbacks.onError("浏览器不支持流式响应");
     callbacks.onDone();
     return;
@@ -1097,6 +1126,7 @@ export async function streamGenerate(
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      touchIdleTimer();
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? "";
@@ -1112,10 +1142,19 @@ export async function streamGenerate(
     }
   } catch (err) {
     // 用户主动取消：静默退出，不派发任何合成事件（避免过期流污染新状态）
-    if ((err as Error).name === "AbortError") return;
-    callbacks.onError("流式连接中断，请重试");
+    if (signal?.aborted) {
+      clearWatchdogs();
+      return;
+    }
+    protocolError = true;
+    callbacks.onError(
+      watchdog.signal.aborted
+        ? "生成等待时间过长，已保留当前页面状态；请重试本次请求"
+        : "流式连接中断，请重试",
+    );
   }
 
+  clearWatchdogs();
   if (!receivedDone && !protocolError)
     callbacks.onError("生成连接提前结束，未收到完成确认，请重试");
   callbacks.onDone();

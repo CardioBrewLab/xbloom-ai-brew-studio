@@ -1,13 +1,39 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
 import {
+  assertPublicModelHostname,
   detectModelProvider,
   discoverModels,
   equivalentModelBaseUrls,
   generateModelText,
+  isPublicInternetAddress,
   normalizeModelBaseUrl,
   testModelConnection,
 } from "../../shared/src/model-provider.ts";
+
+const PUBLIC_HOST_RESOLVER = async (): Promise<string[]> => ["93.184.216.34"];
+
+function oversizedResponse(
+  bytes: number,
+  status = 200,
+): {
+  response: Response;
+  wasCanceled: () => boolean;
+} {
+  let canceled = false;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(bytes));
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
+  return {
+    response: new Response(body, { status }),
+    wasCanceled: () => canceled,
+  };
+}
 
 it("按官方域名识别原生 Claude / Gemini，其余走 OpenAI 兼容协议", () => {
   assert.equal(detectModelProvider("https://api.anthropic.com/v1"), "anthropic");
@@ -36,9 +62,27 @@ it("Hosted 地址校验拦截回环和带凭据 URL", () => {
   );
 });
 
+it("Hosted 出站域名解析拒绝私网、保留与 IPv4-mapped IPv6 地址", async () => {
+  assert.equal(isPublicInternetAddress("93.184.216.34"), true);
+  assert.equal(isPublicInternetAddress("10.0.0.1"), false);
+  assert.equal(isPublicInternetAddress("203.0.113.8"), false);
+  assert.equal(isPublicInternetAddress("::ffff:127.0.0.1"), false);
+  assert.equal(isPublicInternetAddress("::ffff:7f00:1"), false);
+  assert.equal(isPublicInternetAddress("::ffff:c0a8:101"), false);
+  assert.equal(isPublicInternetAddress("::ffff:5db8:d822"), true);
+  await assert.doesNotReject(
+    assertPublicModelHostname("https://gateway.example.com/v1", PUBLIC_HOST_RESOLVER),
+  );
+  await assert.rejects(
+    assertPublicModelHostname("https://gateway.example.com/v1", async () => ["192.168.1.10"]),
+    /非公网地址/,
+  );
+});
+
 it("OpenAI 兼容模型发现使用 Bearer 和 /models", async () => {
   let requestUrl = "";
   let authorization = "";
+  let redirect = "";
   const result = await discoverModels(
     {
       provider: "openai-compatible",
@@ -46,15 +90,18 @@ it("OpenAI 兼容模型发现使用 Bearer 和 /models", async () => {
       apiKey: "TOKEN",
     },
     {
+      resolveHostname: PUBLIC_HOST_RESOLVER,
       fetcher: async (input, init) => {
         requestUrl = String(input);
         authorization = new Headers(init?.headers).get("authorization") ?? "";
+        redirect = String(init?.redirect ?? "");
         return Response.json({ data: [{ id: "model-b" }, { id: "model-a" }] });
       },
     },
   );
   assert.equal(requestUrl, "https://api.example.com/v1/models");
   assert.equal(authorization, "Bearer TOKEN");
+  assert.equal(redirect, "error");
   assert.equal(result.baseUrl, "https://api.example.com/v1");
   assert.deepEqual(result.models, ["model-a", "model-b"]);
 });
@@ -67,6 +114,7 @@ it("模型发现兼容网关的 models 数组与常见模型字段", async () =>
       apiKey: "TOKEN",
     },
     {
+      resolveHostname: PUBLIC_HOST_RESOLVER,
       fetcher: async () =>
         Response.json({
           models: [{ id: "model-a" }, { model: "model-b" }, { model_id: "model-c" }, "model-d"],
@@ -84,6 +132,7 @@ it("网关同时返回 data 与 models 时合并全部模型", async () => {
       apiKey: "TOKEN",
     },
     {
+      resolveHostname: PUBLIC_HOST_RESOLVER,
       fetcher: async () =>
         Response.json({ data: [{ id: "model-a" }], models: [{ name: "model-b" }] }),
     },
@@ -99,7 +148,7 @@ it("模型发现兼容裸数组，并保留超过 300 个的聚合网关模型�
       baseUrl: "https://gateway.example.com/v1",
       apiKey: "TOKEN",
     },
-    { fetcher: async () => Response.json(models) },
+    { resolveHostname: PUBLIC_HOST_RESOLVER, fetcher: async () => Response.json(models) },
   );
   assert.equal(result.models.length, 350);
   assert.ok(result.models.includes("model-349"));
@@ -114,6 +163,7 @@ it("Gemini 模型发现读取全部分页并去除 models/ 前缀", async () => 
       apiKey: "TOKEN",
     },
     {
+      resolveHostname: PUBLIC_HOST_RESOLVER,
       fetcher: async (input) => {
         const url = String(input);
         requestUrls.push(url);
@@ -141,6 +191,7 @@ it("OpenAI 兼容网关使用 has_more/last_id 时继续读取 after_id 下一�
       apiKey: "TOKEN",
     },
     {
+      resolveHostname: PUBLIC_HOST_RESOLVER,
       fetcher: async (input) => {
         const url = String(input);
         requestUrls.push(url);
@@ -166,6 +217,7 @@ it("OpenAI 兼容根地址遇到网页时自动尝试 /v1 并返回修正地址"
       apiKey: "TOKEN",
     },
     {
+      resolveHostname: PUBLIC_HOST_RESOLVER,
       fetcher: async (input) => {
         requestUrls.push(String(input));
         return String(input).endsWith("/v1/models")
@@ -192,6 +244,7 @@ it("根地址与 /v1 都有效时采用模型更完整的入口", async () => {
       apiKey: "TOKEN",
     },
     {
+      resolveHostname: PUBLIC_HOST_RESOLVER,
       fetcher: async (input) =>
         String(input).endsWith("/v1/models")
           ? Response.json({ data: [{ id: "model-a" }, { id: "model-b" }] })
@@ -211,6 +264,7 @@ it("OpenAI 兼容根地址的首跳报错时仍在同一总预算内尝试 /v1",
       apiKey: "TOKEN",
     },
     {
+      resolveHostname: PUBLIC_HOST_RESOLVER,
       fetcher: async (input) => {
         requestUrls.push(String(input));
         if (requestUrls.length === 1) throw new DOMException("root timeout", "TimeoutError");
@@ -233,7 +287,10 @@ it("非根路径返回网页时给出 API 地址提示而非请求体 JSON 错�
         baseUrl: "https://gateway.example.com/api",
         apiKey: "TOKEN",
       },
-      { fetcher: async () => new Response("<html>console</html>") },
+      {
+        resolveHostname: PUBLIC_HOST_RESOLVER,
+        fetcher: async () => new Response("<html>console</html>"),
+      },
     ),
     /模型接口模型列表响应不是 JSON.*\/v1/,
   );
@@ -242,6 +299,7 @@ it("非根路径返回网页时给出 API 地址提示而非请求体 JSON 错�
 it("Claude 使用 Messages 协议并读取 content.text", async () => {
   let requestUrl = "";
   let version = "";
+  let redirect = "";
   let payload: Record<string, unknown> = {};
   const text = await generateModelText(
     {
@@ -255,9 +313,11 @@ it("Claude 使用 Messages 协议并读取 content.text", async () => {
       { role: "user", content: "HELLO" },
     ],
     {
+      resolveHostname: PUBLIC_HOST_RESOLVER,
       fetcher: async (input, init) => {
         requestUrl = String(input);
         version = new Headers(init?.headers).get("anthropic-version") ?? "";
+        redirect = String(init?.redirect ?? "");
         payload = JSON.parse(String(init?.body));
         return Response.json({ content: [{ type: "text", text: "OK" }] });
       },
@@ -265,6 +325,7 @@ it("Claude 使用 Messages 协议并读取 content.text", async () => {
   );
   assert.equal(requestUrl, "https://api.anthropic.com/v1/messages");
   assert.equal(version, "2023-06-01");
+  assert.equal(redirect, "error");
   assert.equal(payload.system, "SYSTEM");
   assert.equal(text, "OK");
 });
@@ -280,6 +341,7 @@ it("Gemini 使用 generateContent 并读取 candidates parts", async () => {
     },
     [{ role: "user", content: "HELLO" }],
     {
+      resolveHostname: PUBLIC_HOST_RESOLVER,
       fetcher: async (input) => {
         requestUrl = String(input);
         return Response.json({ candidates: [{ content: { parts: [{ text: "OK" }] } }] });
@@ -306,6 +368,7 @@ it("OpenAI 推理模型改用 max_completion_tokens 且省略 temperature", asyn
     {
       maxTokens: 64,
       temperature: 0,
+      resolveHostname: PUBLIC_HOST_RESOLVER,
       fetcher: async (_input, init) => {
         payload = JSON.parse(String(init?.body));
         return Response.json({ choices: [{ message: { content: "OK" } }] });
@@ -331,6 +394,7 @@ it("普通 OpenAI 兼容模型继续使用 max_tokens 与 temperature", async ()
     {
       maxTokens: 32,
       temperature: 0.2,
+      resolveHostname: PUBLIC_HOST_RESOLVER,
       fetcher: async (_input, init) => {
         payload = JSON.parse(String(init?.body));
         return Response.json({ choices: [{ message: { content: "OK" } }] });
@@ -352,9 +416,91 @@ it("生成接口返回网页时给出接口地址提示", async () => {
         model: "model-a",
       },
       [{ role: "user", content: "HELLO" }],
-      { fetcher: async () => new Response("<html>console</html>") },
+      {
+        resolveHostname: PUBLIC_HOST_RESOLVER,
+        fetcher: async () => new Response("<html>console</html>"),
+      },
     ),
     /模型接口生成响应不是 JSON.*\/v1/,
+  );
+});
+
+it("成功响应流式读取超过 2 MiB 时取消 reader 并返回稳定错误类别", async () => {
+  const oversized = oversizedResponse(2 * 1024 * 1024 + 1);
+  await assert.rejects(
+    generateModelText(
+      {
+        provider: "openai-compatible",
+        baseUrl: "https://gateway.example.com/v1",
+        apiKey: "TOKEN",
+        model: "model-a",
+      },
+      [{ role: "user", content: "HELLO" }],
+      { resolveHostname: PUBLIC_HOST_RESOLVER, fetcher: async () => oversized.response },
+    ),
+    /模型接口成功响应正文超过大小上限/,
+  );
+  assert.equal(oversized.wasCanceled(), true);
+});
+
+it("错误响应流式读取超过 64 KiB 时取消 reader 并返回稳定错误类别", async () => {
+  const oversized = oversizedResponse(64 * 1024 + 1, 502);
+  await assert.rejects(
+    generateModelText(
+      {
+        provider: "openai-compatible",
+        baseUrl: "https://gateway.example.com/v1",
+        apiKey: "TOKEN",
+        model: "model-a",
+      },
+      [{ role: "user", content: "HELLO" }],
+      { resolveHostname: PUBLIC_HOST_RESOLVER, fetcher: async () => oversized.response },
+    ),
+    /模型接口错误响应正文超过大小上限/,
+  );
+  assert.equal(oversized.wasCanceled(), true);
+});
+
+it("Content-Length 超限时在读取正文前返回稳定错误类别", async () => {
+  await assert.rejects(
+    generateModelText(
+      {
+        provider: "openai-compatible",
+        baseUrl: "https://gateway.example.com/v1",
+        apiKey: "TOKEN",
+        model: "model-a",
+      },
+      [{ role: "user", content: "HELLO" }],
+      {
+        resolveHostname: PUBLIC_HOST_RESOLVER,
+        fetcher: async () =>
+          new Response(null, {
+            headers: { "content-length": String(2 * 1024 * 1024 + 1) },
+          }),
+      },
+    ),
+    /模型接口成功响应正文超过大小上限/,
+  );
+
+  await assert.rejects(
+    generateModelText(
+      {
+        provider: "openai-compatible",
+        baseUrl: "https://gateway.example.com/v1",
+        apiKey: "TOKEN",
+        model: "model-a",
+      },
+      [{ role: "user", content: "HELLO" }],
+      {
+        resolveHostname: PUBLIC_HOST_RESOLVER,
+        fetcher: async () =>
+          new Response(null, {
+            status: 502,
+            headers: { "content-length": String(64 * 1024 + 1) },
+          }),
+      },
+    ),
+    /模型接口错误响应正文超过大小上限/,
   );
 });
 
@@ -368,6 +514,7 @@ it("推理模型连接测试预留可见正文所需的 token 空间", async () 
       model: "o3-mini",
     },
     {
+      resolveHostname: PUBLIC_HOST_RESOLVER,
       fetcher: async (_input, init) => {
         payload = JSON.parse(String(init?.body));
         return Response.json({ choices: [{ message: { content: "OK" } }] });

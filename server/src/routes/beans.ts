@@ -16,6 +16,11 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
+import {
+  BeanInputSchema,
+  BeanPatchSchema as SharedBeanPatchSchema,
+  isCalendarDate,
+} from "../../../shared/dist/data-schema.js";
 import { atomicWriteJson, loadJsonArray } from "../lib/data-io.js";
 import { withFileLock } from "../lib/store-mutex.js";
 import { recommendBeans, type BeanRecommendation } from "../lib/bean-advisor.js";
@@ -28,55 +33,20 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 export const BEANS_FILE = path.resolve(here, "../../../data/beans.json");
 
 /** 豆档案字段（除 name 外全部可选） */
-export const BeanSchema = z.object({
-  name: z.string().min(1, "name 不能为空"),
-  roaster: z.string().optional(),
-  origin: z.string().optional(),
-  process: z.string().optional(),
-  varietal: z.string().optional(),
-  roastLevel: z.string().optional(),
-  tastingNotes: z.string().optional(),
-  /** 自由文本豆信息原文（generate 自动落档的最小档案携带，任务 #35） */
-  rawDescription: z.string().optional(),
-  /** 库存克数（任务 #50）；undefined = 未录入库存 */
-  stockGrams: z.number().min(0, "stockGrams 不能为负").optional(),
-  /** 烘焙日期，格式 YYYY-MM-DD，且必须是真实日历日期（任务 #65：2026-13-01 等进位值拒绝） */
-  roastDate: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/, "roastDate 格式应为 YYYY-MM-DD")
-    .refine((s) => isCalendarDate(s), "roastDate 不是真实存在的日历日期")
-    .optional(),
-  /** 养豆期天数：烘焙后多久进入适饮窗口（任务 #50） */
-  restDays: z.number().min(0, "restDays 不能为负").optional(),
-  /** 适饮高峰期天数（烘焙后计）；缺省语义 45 由使用方（推荐引擎）兜底（任务 #50） */
-  peakWindowDays: z.number().min(1, "peakWindowDays 至少为 1").optional(),
-});
+export const BeanSchema = BeanInputSchema;
 
 /**
  * YYYY-MM-DD 是否真实存在（任务 #65）：构造本地日期后回读年/月/日比对，
  * 进位值（如 2026-13-01 / 2026-02-30）会被 Date 构造器进位为下月，回读不等即非法。
  */
-export function isCalendarDate(s: string): boolean {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
-  if (!m) return false;
-  const y = Number(m[1]);
-  const mo = Number(m[2]);
-  const d = Number(m[3]);
-  const dt = new Date(y, mo - 1, d);
-  return dt.getFullYear() === y && dt.getMonth() === mo - 1 && dt.getDate() === d;
-}
+export { isCalendarDate };
 
 /**
  * 部分更新白名单（PATCH /api/beans/:id 用）：
  * roastDate/stockGrams/restDays/peakWindowDays 允许显式 null —— 语义为「清空该字段」（任务 #65），
  * 区分「未触碰（undefined，保持原值）」与「清空（null，删除字段）」。
  */
-export const BeanPatchSchema = BeanSchema.partial().extend({
-  roastDate: BeanSchema.shape.roastDate.nullable().optional(),
-  stockGrams: BeanSchema.shape.stockGrams.nullable().optional(),
-  restDays: BeanSchema.shape.restDays.nullable().optional(),
-  peakWindowDays: BeanSchema.shape.peakWindowDays.nullable().optional(),
-});
+export const BeanPatchSchema = SharedBeanPatchSchema;
 
 export interface Bean extends z.infer<typeof BeanSchema> {
   id: string;

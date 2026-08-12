@@ -57,6 +57,7 @@ import {
 } from "./lib/variant.js";
 import { saveCompletionIsCurrent } from "./lib/save-state.js";
 import { hostedPage } from "./lib/companion.js";
+import { createRequestId } from "./lib/request-id.js";
 import {
   INTERFACE_MODE_STORAGE_KEY,
   readInterfaceMode,
@@ -159,21 +160,35 @@ const THEME_KEY = "xbloom-theme";
 export default function App() {
   // ---- 主题（亮色默认，持久化） ----
   const [theme, setTheme] = useState<"dark" | "light">(() => {
-    const saved = localStorage.getItem(THEME_KEY);
-    return saved === "dark" ? "dark" : "light";
+    try {
+      return localStorage.getItem(THEME_KEY) === "dark" ? "dark" : "light";
+    } catch {
+      return "light";
+    }
   });
   // 属性在渲染期同步：子组件（如 CurveChart 从 CSS 变量读色板）同帧即可取到新主题值（任务 #108）
   if (document.documentElement.dataset.theme !== theme) {
     document.documentElement.dataset.theme = theme;
   }
   useEffect(() => {
-    localStorage.setItem(THEME_KEY, theme);
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      // 受限 WebView/隐私模式仍可使用当前会话，只跳过持久化。
+    }
+    document
+      .querySelector('meta[name="theme-color"]')
+      ?.setAttribute("content", theme === "dark" ? "#11110f" : "#fafaf7");
   }, [theme]);
 
   // ---- 手机 / 电脑双界面：默认自动识别，用户选择会在当前浏览器持久保存。 ----
-  const [interfaceMode, setInterfaceMode] = useState<InterfaceMode>(() =>
-    readInterfaceMode(window.localStorage),
-  );
+  const [interfaceMode, setInterfaceMode] = useState<InterfaceMode>(() => {
+    try {
+      return readInterfaceMode(window.localStorage);
+    } catch {
+      return "auto";
+    }
+  });
   const [deviceRevision, setDeviceRevision] = useState(0);
   const deviceSignals = useMemo<DeviceSignals>(
     () => ({
@@ -198,7 +213,11 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
-    localStorage.setItem(INTERFACE_MODE_STORAGE_KEY, interfaceMode);
+    try {
+      localStorage.setItem(INTERFACE_MODE_STORAGE_KEY, interfaceMode);
+    } catch {
+      // 同上：存储受限时保留当前会话内的界面选择。
+    }
     document.documentElement.dataset.interface = mobileUi ? "mobile" : "desktop";
   }, [interfaceMode, mobileUi]);
 
@@ -673,7 +692,7 @@ export default function App() {
                       const name = `${ctx.base.name} · v${ctx.version}`;
                       saveInFlightRef.current = true;
                       setSaving(true);
-                      const clientRequestId = crypto.randomUUID();
+                      const clientRequestId = createRequestId();
                       const saveOptions: RecipeSaveOptions = {
                         clientRequestId,
                         name,
@@ -750,7 +769,7 @@ export default function App() {
                       const recipeRevision = recipeRevisionRef.current;
                       saveInFlightRef.current = true;
                       setSaving(true);
-                      const clientRequestId = crypto.randomUUID();
+                      const clientRequestId = createRequestId();
                       const saveOptions: RecipeSaveOptions = {
                         ...generatedMeta,
                         clientRequestId,
@@ -823,6 +842,25 @@ export default function App() {
     },
     [invalidatePendingSave, replaceActiveRecipe],
   );
+
+  const cancelGeneration = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    generationIdRef.current += 1;
+    setGenerating(false);
+    setInputCollapsed(false);
+    setGenerationNotice("已停止本次生成；当前页面与已保存记录保持不变。可调整输入后重新开始。");
+    setResearch((state) =>
+      state.phase === "searching"
+        ? { ...state, phase: "done", ok: false, message: "调研已停止" }
+        : state,
+    );
+    setReview((state) => (state.phase === "reviewing" ? { ...state, phase: "done" } : state));
+    setCandidates((state) => candidatesErrorReset(state));
+    setVariant((state) =>
+      state.phase === "running" ? { ...state, phase: "failed", message: "参数优化已停止" } : state,
+    );
+  }, []);
 
   const saveRecipe = useCallback(async () => {
     if (!recipe || saveInFlightRef.current) return;
@@ -907,7 +945,7 @@ export default function App() {
         }
       }
 
-      const clientRequestId = pendingSnapshotCheckpoint?.clientRequestId ?? crypto.randomUUID();
+      const clientRequestId = pendingSnapshotCheckpoint?.clientRequestId ?? createRequestId();
       const saveOptions: RecipeSaveOptions = pendingSnapshotCheckpoint?.saveOptions ?? {
         clientRequestId,
         ...(genMeta?.refUrls?.length ? { refUrls: genMeta.refUrls } : {}),
@@ -1027,7 +1065,7 @@ export default function App() {
             resOriginal = { ok: true, id: localRecipeId };
           }
           if (!resOriginal) {
-            originalClientRequestId ??= crypto.randomUUID();
+            originalClientRequestId ??= createRequestId();
             originalSaveOptions ??= {
               clientRequestId: originalClientRequestId,
               ...shared,
@@ -1089,7 +1127,7 @@ export default function App() {
             resImproved = { ok: true, id: localRecipeId };
           }
           if (!resImproved) {
-            improvedClientRequestId ??= crypto.randomUUID();
+            improvedClientRequestId ??= createRequestId();
             improvedSaveOptions ??= {
               clientRequestId: improvedClientRequestId,
               name: improvedName,
@@ -1316,8 +1354,7 @@ export default function App() {
           setSaving(true);
         }
         if (!recipeId && recipeSnapshot) {
-          const clientRequestId =
-            pendingGeneratedCheckpoint?.clientRequestId ?? crypto.randomUUID();
+          const clientRequestId = pendingGeneratedCheckpoint?.clientRequestId ?? createRequestId();
           const saveOptions: RecipeSaveOptions = pendingGeneratedCheckpoint?.saveOptions ?? {
             clientRequestId,
             ...(genMetaSnapshot?.refUrls?.length ? { refUrls: genMetaSnapshot.refUrls } : {}),
@@ -1520,6 +1557,7 @@ export default function App() {
               defaultModel={config?.defaultModel ?? ""}
               generating={generating}
               onGenerate={generate}
+              onCancel={cancelGeneration}
               beans={beans ?? []}
               onOpenBeans={() => setTab("beans")}
               collapsed={inputCollapsed}
@@ -1723,6 +1761,7 @@ export default function App() {
             <HistoryList
               items={history}
               error={historyError}
+              onRetry={() => void refreshHistory()}
               onLoad={loadStoredRecipe}
               onDelete={(id) => void deleteHistory(id)}
               compareIds={compareIds}

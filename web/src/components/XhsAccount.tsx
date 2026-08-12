@@ -322,7 +322,7 @@ export default function XhsAccount({
         onClick={openModal}
         title="小红书账号：扫码登录 / 续期 / 切换账号"
         className={`flex items-center gap-1.5 border text-[11px] leading-4 transition-colors duration-150 hover:bg-[var(--bg-inset)] ${
-          compact ? "h-8 w-8 justify-center rounded-lg p-0" : "rounded-full px-2.5 py-1"
+          compact ? "h-11 w-11 justify-center rounded-lg p-0" : "rounded-full px-2.5 py-1"
         } ${
           showExpiredAlert
             ? "border-[color-mix(in_srgb,var(--bad)_45%,transparent)] text-[var(--bad)]"

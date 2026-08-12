@@ -8,6 +8,7 @@ import {
 } from "../lib/api.js";
 import {
   buildLlmSettingsUpdate,
+  normalizeSettingsBaseUrl,
   settingsBaseUrlOrigin,
   type LlmSettingsDraft,
 } from "../lib/llm-settings.js";
@@ -22,6 +23,21 @@ const EMPTY_DRAFT: LlmSettingsDraft = {
   apiKey: "",
   fallbackApiKey: "",
 };
+
+/** 只在跨 origin 时清理备用模型，避免 URL 编辑的中间无效态触发误清理。 */
+export function hasBaseUrlBoundaryChanged(currentBaseUrl: string, nextBaseUrl: string): boolean {
+  try {
+    const current = new URL(normalizeSettingsBaseUrl(currentBaseUrl));
+    const next = new URL(normalizeSettingsBaseUrl(nextBaseUrl));
+    if (current.origin !== next.origin) return true;
+    const currentPath = current.pathname.replace(/\/+$/, "");
+    const nextPath = next.pathname.replace(/\/+$/, "");
+    const rootOrV1 = (path: string) => path === "" || path === "/v1";
+    return currentPath !== nextPath && !(rootOrV1(currentPath) && rootOrV1(nextPath));
+  } catch {
+    return false;
+  }
+}
 
 export interface ApiSettingsModalProps {
   open: boolean;
@@ -84,14 +100,27 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
   }, [open]);
 
   const updateDraft = (key: keyof LlmSettingsDraft, value: string) => {
-    setDraft((current) => ({ ...current, [key]: value }));
+    setDraft((current) => {
+      const next = { ...current, [key]: value };
+      if (key === "baseUrl" && hasBaseUrlBoundaryChanged(current.baseUrl, value)) {
+        next.fallbackModel = "";
+        next.thirdModel = "";
+      }
+      return next;
+    });
     setSaved(false);
     setTestResult("");
   };
 
   const selectPreset = (preset: ModelProviderPreset) => {
     setProvider(preset.provider);
-    setDraft((current) => ({ ...current, baseUrl: preset.baseUrl, model: "" }));
+    setDraft((current) => ({
+      ...current,
+      baseUrl: preset.baseUrl,
+      model: "",
+      fallbackModel: "",
+      thirdModel: "",
+    }));
     setDetectedModels([]);
     setSaved(false);
     setTestResult("");
@@ -115,6 +144,9 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
       setProvider(result.provider);
       setDetectedModels(result.models);
       const resolvedBaseUrl = result.baseUrl || requestedBaseUrl;
+      const boundaryChanged =
+        requestedProvider !== result.provider ||
+        hasBaseUrlBoundaryChanged(requestedBaseUrl, resolvedBaseUrl);
       const endpointCompleted =
         resolvedBaseUrl.replace(/\/+$/, "") !== requestedBaseUrl.replace(/\/+$/, "");
       setDraft((current) => ({
@@ -124,6 +156,7 @@ export default function ApiSettingsModal({ open, onClose, onApplied }: ApiSettin
           !current.model.trim() || !result.models.includes(current.model.trim())
             ? (result.models[0] ?? "")
             : current.model,
+        ...(boundaryChanged ? { fallbackModel: "", thirdModel: "" } : {}),
       }));
       setTestResult(
         `${endpointCompleted ? "已自动补全接口路径 · " : ""}已识别 ${result.models.length} 个模型 · ${result.latencyMs}ms`,

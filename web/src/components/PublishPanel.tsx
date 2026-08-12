@@ -121,6 +121,9 @@ export default function PublishPanel({
                 className={inputCls}
               />
             </Field>
+            <p className="text-[11px] leading-relaxed text-[var(--tx-3)]">
+              在线工作台仅保存加密会话令牌；密码只用于本次登录请求。
+            </p>
             <button
               type="button"
               onClick={() => void login()}

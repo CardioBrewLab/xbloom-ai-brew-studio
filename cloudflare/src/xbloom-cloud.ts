@@ -1,4 +1,11 @@
-import { RecipeSchema, cloudToPattern, type Recipe } from "../../shared/src/recipe-schema.ts";
+import {
+  BYPASS_RATIO_RANGE,
+  CLOUD_LIMITS,
+  RecipeSchema,
+  cloudToPattern,
+  type LimitRange,
+  type Recipe,
+} from "../../shared/src/recipe-schema.ts";
 import { toCloudPayload } from "../../shared/dist/xbloom-cloud-payload.js";
 import type { AuthUser } from "./auth.ts";
 import { decryptText, encryptText } from "./crypto.ts";
@@ -20,7 +27,6 @@ interface XbloomSession {
 interface StoredXbloomSession {
   region: XbloomRegion;
   email: string;
-  password: string;
   session: XbloomSession;
 }
 
@@ -175,6 +181,39 @@ async function saveStored(
     .run();
 }
 
+export function parseStoredXbloomSession(value: unknown): {
+  stored: StoredXbloomSession;
+  containedLegacyPassword: boolean;
+} {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("已保存的 xBloom 会话格式有误，请重新登录");
+  }
+  const parsed = value as Record<string, unknown>;
+  const session = parsed.session as Record<string, unknown> | undefined;
+  if (
+    (parsed.region !== "cn" && parsed.region !== "global") ||
+    typeof parsed.email !== "string" ||
+    !parsed.email ||
+    typeof session?.memberId !== "number" ||
+    typeof session.token !== "string" ||
+    !session.token
+  ) {
+    throw new Error("已保存的 xBloom 会话格式有误，请重新登录");
+  }
+  return {
+    stored: {
+      region: parsed.region,
+      email: parsed.email,
+      session: {
+        memberId: session.memberId,
+        token: session.token,
+        email: typeof session.email === "string" && session.email ? session.email : parsed.email,
+      },
+    },
+    containedLegacyPassword: Object.hasOwn(parsed, "password"),
+  };
+}
+
 async function loadStored(env: XbloomEnv, user: AuthUser): Promise<StoredXbloomSession | null> {
   const row = await env.DB.prepare(
     "SELECT region,account_hint,encrypted_payload FROM user_external_sessions WHERE user_id=? AND service='xbloom'",
@@ -182,20 +221,12 @@ async function loadStored(env: XbloomEnv, user: AuthUser): Promise<StoredXbloomS
     .bind(user.id)
     .first<ExternalSessionRow>();
   if (!row) return null;
-  const parsed = JSON.parse(
-    await decryptText(row.encrypted_payload, encryptionSecret(env)),
-  ) as StoredXbloomSession;
-  if (
-    !parsed ||
-    !["cn", "global"].includes(parsed.region) ||
-    !parsed.email ||
-    !parsed.password ||
-    typeof parsed.session?.memberId !== "number" ||
-    !parsed.session.token
-  ) {
-    throw new Error("已保存的 xBloom 会话格式有误，请重新登录");
-  }
-  return parsed;
+  const parsed = parseStoredXbloomSession(
+    JSON.parse(await decryptText(row.encrypted_payload, encryptionSecret(env))),
+  );
+  // 旧版本曾把第三方账号密码放入加密载荷；读取时立即重写为仅含会话令牌的格式。
+  if (parsed.containedLegacyPassword) await saveStored(env, user, parsed.stored);
+  return parsed.stored;
 }
 
 class XbloomAuthError extends Error {}
@@ -211,10 +242,10 @@ async function withStoredSession<T>(
     return await operation(stored);
   } catch (error) {
     if (!(error instanceof XbloomAuthError)) throw error;
-    const session = await loginRemote(stored.region, stored.email, stored.password);
-    const refreshed = { ...stored, session };
-    await saveStored(env, user, refreshed);
-    return operation(refreshed);
+    await env.DB.prepare("DELETE FROM user_external_sessions WHERE user_id=? AND service='xbloom'")
+      .bind(user.id)
+      .run();
+    throw new Error("xBloom 登录已过期，请重新登录");
   }
 }
 
@@ -261,6 +292,35 @@ function numberValue(value: unknown, fallback: number): number {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function ensureCloudRecipe(recipe: Recipe): Recipe {
+  const errors: string[] = [];
+  const check = (field: string, value: number, range: LimitRange | undefined): void => {
+    if (range && (value < range.min || value > range.max)) {
+      errors.push(`${field}=${value} 超出云端允许范围 [${range.min}, ${range.max}]`);
+    }
+  };
+
+  check("doseGrams", recipe.doseGrams, CLOUD_LIMITS.doseGrams);
+  check("grinderSize", recipe.grinderSize, CLOUD_LIMITS.grinderSize);
+  check("bypassVolume", recipe.bypassVolume, CLOUD_LIMITS.bypassVolume);
+  check("bypassTemp", recipe.bypassTemp, CLOUD_LIMITS.bypassTemp);
+  recipe.pours.forEach((pour, index) => {
+    check(`pours[${index}].temperature`, pour.temperature, CLOUD_LIMITS.waterTemperature);
+    check(`pours[${index}].flowRate`, pour.flowRate, CLOUD_LIMITS.flowRate);
+    check(`pours[${index}].pausing`, pour.pausing, CLOUD_LIMITS.pausing);
+  });
+
+  const effectiveWater = recipe.grandWater + (recipe.bypassEnabled ? recipe.bypassVolume : 0);
+  const ratio = Math.round((effectiveWater / recipe.doseGrams) * 10) / 10;
+  if (ratio < BYPASS_RATIO_RANGE.min || ratio > BYPASS_RATIO_RANGE.max) {
+    errors.push(
+      `最终粉水比 ${ratio} 超出云端允许范围 [${BYPASS_RATIO_RANGE.min}, ${BYPASS_RATIO_RANGE.max}]`,
+    );
+  }
+  if (errors.length > 0) throw new Error(`配方超出 xBloom 云端范围：${errors.join("；")}`);
+  return recipe;
+}
+
 function parseRecipeVo(value: Record<string, unknown>): Recipe {
   const dose = numberValue(value.dose, 15);
   const ratio = numberValue(value.grandWater, 15);
@@ -271,40 +331,42 @@ function parseRecipeVo(value: Record<string, unknown>): Recipe {
         ? value.pourList
         : [];
   if (!rawPours.length) throw new Error("xBloom 分享配方缺少注水段");
-  return RecipeSchema.parse({
-    name: typeof value.theName === "string" && value.theName.trim() ? value.theName : "导入配方",
-    cupType: value.cupType === 2 ? "xdripper" : "other",
-    doseGrams: dose,
-    grinderSize: numberValue(value.grinderSize, 70),
-    rpm: numberValue(value.rpm, 80),
-    grandWater: Math.round(dose * ratio * 10) / 10,
-    pours: rawPours.map((item, index) => {
-      const pour = (item ?? {}) as Record<string, unknown>;
-      return {
-        volume: numberValue(pour.volume, 30),
-        temperature: numberValue(pour.temperature, 93),
-        flowRate: numberValue(pour.flowRate, 3),
-        pattern: cloudToPattern(numberValue(pour.pattern, 2)),
-        pausing: numberValue(pour.pausing, 0),
-        vibBefore: numberValue(pour.isEnableVibrationBefore, 2) === 1,
-        vibAfter: numberValue(pour.isEnableVibrationAfter, 2) === 1,
-        theName:
-          typeof pour.theName === "string" && pour.theName.trim()
-            ? pour.theName.trim()
-            : index === 0
-              ? "Bloom"
-              : `Pour ${index}`,
-      };
+  return ensureCloudRecipe(
+    RecipeSchema.parse({
+      name: typeof value.theName === "string" && value.theName.trim() ? value.theName : "导入配方",
+      cupType: value.cupType === 2 ? "xdripper" : "other",
+      doseGrams: dose,
+      grinderSize: numberValue(value.grinderSize, 70),
+      rpm: numberValue(value.rpm, 80),
+      grandWater: Math.round(dose * ratio * 10) / 10,
+      pours: rawPours.map((item, index) => {
+        const pour = (item ?? {}) as Record<string, unknown>;
+        return {
+          volume: numberValue(pour.volume, 30),
+          temperature: numberValue(pour.temperature, 93),
+          flowRate: numberValue(pour.flowRate, 3),
+          pattern: cloudToPattern(numberValue(pour.pattern, 2)),
+          pausing: numberValue(pour.pausing, 0),
+          vibBefore: numberValue(pour.isEnableVibrationBefore, 2) === 1,
+          vibAfter: numberValue(pour.isEnableVibrationAfter, 2) === 1,
+          theName:
+            typeof pour.theName === "string" && pour.theName.trim()
+              ? pour.theName.trim()
+              : index === 0
+                ? "Bloom"
+                : `Pour ${index}`,
+        };
+      }),
+      bypassEnabled: numberValue(value.isEnableBypassWater, 2) === 1,
+      bypassVolume: numberValue(value.bypassVolume, 5),
+      bypassTemp: numberValue(value.bypassTemp, 85),
+      isSetGrinderSize: numberValue(value.isSetGrinderSize, 1) === 2 ? 2 : 1,
+      theColor:
+        typeof value.theColor === "string" && /^#[0-9a-f]{6}$/i.test(value.theColor)
+          ? value.theColor
+          : "#C9D5B8",
     }),
-    bypassEnabled: numberValue(value.isEnableBypassWater, 2) === 1,
-    bypassVolume: numberValue(value.bypassVolume, 5),
-    bypassTemp: numberValue(value.bypassTemp, 85),
-    isSetGrinderSize: numberValue(value.isSetGrinderSize, 1) === 2 ? 2 : 1,
-    theColor:
-      typeof value.theColor === "string" && /^#[0-9a-f]{6}$/i.test(value.theColor)
-        ? value.theColor
-        : "#C9D5B8",
-  });
+  );
 }
 
 async function bodyObject(request: Request): Promise<Record<string, unknown>> {
@@ -323,7 +385,19 @@ function validatedRecipe(body: Record<string, unknown>): Recipe {
   const result = RecipeSchema.safeParse(body.recipe);
   if (!result.success)
     throw new Error(`配方结构有误：${result.error.issues[0]?.message ?? "字段不完整"}`);
-  return result.data;
+  return ensureCloudRecipe(result.data);
+}
+
+function mappedCloudRecipe(recipe: Recipe, name?: string) {
+  const mapped = toCloudPayload(recipe, name);
+  ensureCloudRecipe(
+    RecipeSchema.parse({
+      ...recipe,
+      grandWater: mapped.alignedGrandWater,
+      pours: mapped.alignedPours,
+    }),
+  );
+  return mapped;
 }
 
 async function writeRecipe(
@@ -332,7 +406,7 @@ async function writeRecipe(
   name: string | undefined,
   tableId?: number,
 ) {
-  const mapped = toCloudPayload(recipe, name);
+  const mapped = mappedCloudRecipe(recipe, name);
   const endpoint = tableId ? "tuRecipeUpdate.tuhtml" : "tuRecipeAdd.tuhtml";
   const response = await postJson(
     stored.region,
@@ -350,7 +424,8 @@ async function writeRecipe(
   const resultTableId = tableId ?? numberValue(response.tableId, 0);
   if (!resultTableId) throw new Error("xBloom 响应缺少配方 ID");
   const rows = await listRemote(stored).catch(() => []);
-  const row = rows.find((item) => Number(item.tableId) === resultTableId) ?? {
+  const verifiedRow = rows.find((item) => Number(item.tableId) === resultTableId);
+  const row = verifiedRow ?? {
     tableId: resultTableId,
   };
   return {
@@ -359,8 +434,8 @@ async function writeRecipe(
     shareUrl: shareUrl(stored.region, row),
     adjustments: mapped.adjustments,
     verification: {
-      state: rows.length ? "verified" : "unverified",
-      message: rows.length
+      state: verifiedRow ? "verified" : "unverified",
+      message: verifiedRow
         ? "已写入 xBloom 云端并在账号配方列表中确认"
         : "已写入 xBloom 云端，列表回读稍后可再确认",
     },
@@ -406,6 +481,7 @@ export async function handleXbloomRoute(
       loggedIn: false,
       proxyUsed: false,
       autoLogin: false,
+      passwordStored: false,
       workspaceLoginRequired: true,
       message: "请先登录工作台账号，再连接 xBloom App 账号",
     });
@@ -418,9 +494,10 @@ export async function handleXbloomRoute(
       loggedIn: Boolean(stored),
       proxyUsed: false,
       autoLogin: Boolean(stored),
+      passwordStored: false,
       ...(stored ? { email: maskEmail(stored.email) } : {}),
       ...(stored ? { region: stored.region } : {}),
-      message: stored ? `已保存 xBloom 登录（${maskEmail(stored.email)}）` : "xBloom 云端待登录",
+      message: stored ? `xBloom 会话已连接（${maskEmail(stored.email)}）` : "xBloom 云端待登录",
     });
   }
   if (request.method === "POST" && path === "/api/cloud/login") {
@@ -432,7 +509,7 @@ export async function handleXbloomRoute(
       return json({ ok: false, message: "请填写 xBloom 邮箱和密码" }, 400);
     }
     const session = await loginRemote(region, email, password);
-    await saveStored(env, user, { region, email, password, session });
+    await saveStored(env, user, { region, email, session });
     return json({ ok: true, memberId: String(session.memberId), email: maskEmail(email) });
   }
   if (request.method === "POST" && path === "/api/cloud/logout") {
@@ -445,7 +522,7 @@ export async function handleXbloomRoute(
     const body = await bodyObject(request);
     const recipe = validatedRecipe(body);
     const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : undefined;
-    const mapped = toCloudPayload(recipe, name);
+    const mapped = mappedCloudRecipe(recipe, name);
     const pours = JSON.parse(String(mapped.payload.pourDataJSONStr)) as Array<
       Record<string, unknown>
     >;

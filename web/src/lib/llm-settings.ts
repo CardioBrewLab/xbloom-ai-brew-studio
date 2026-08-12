@@ -43,6 +43,14 @@ export function normalizeSettingsBaseUrl(value: string): string {
   ) {
     throw new Error("模型 API 地址需使用 http(s)，并去掉账号、查询参数和锚点");
   }
+  const loopback =
+    url.hostname === "localhost" ||
+    url.hostname.endsWith(".localhost") ||
+    url.hostname === "127.0.0.1" ||
+    url.hostname === "[::1]";
+  if (url.protocol === "http:" && !loopback) {
+    throw new Error("公网模型 API 地址需使用 HTTPS；本机 localhost 调试可使用 HTTP");
+  }
   return url.toString().replace(/\/+$/, "");
 }
 

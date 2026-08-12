@@ -23,6 +23,10 @@ export interface BrewGuideProps {
 export default function BrewGuide({ recipe, onClose }: BrewGuideProps) {
   const guide = useMemo(() => buildBrewGuide(recipe.pours), [recipe]);
   const total = guide.totalDuration;
+  const bypassEnabled = recipe.bypassEnabled === true;
+  const bypassVolume = recipe.bypassVolume ?? 5;
+  const bypassTemp = recipe.bypassTemp ?? 85;
+  const finalWater = guide.totalVolume + (bypassEnabled ? bypassVolume : 0);
 
   const [phase, setPhase] = useState<Phase>("ready");
   const [elapsed, setElapsed] = useState(0);
@@ -183,12 +187,20 @@ export default function BrewGuide({ recipe, onClose }: BrewGuideProps) {
                 {formatDuration(elapsed)}
               </p>
               <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
-                <GuideChip text={`总注水 ${guide.totalVolume}ml`} tone="water" />
+                <GuideChip
+                  text={`${bypassEnabled ? "机器注水" : "总注水"} ${guide.totalVolume}ml`}
+                  tone="water"
+                />
+                {bypassEnabled && (
+                  <GuideChip text={`冲煮结束后加入 ${bypassVolume}ml / ${bypassTemp}℃`} />
+                )}
                 <GuideChip
                   text={
-                    Math.abs(guide.totalVolume - recipe.grandWater) < 0.05
-                      ? `与配方 ${recipe.grandWater}ml 一致 ✓`
-                      : `配方 ${recipe.grandWater}ml · 实际 ${guide.totalVolume}ml`
+                    bypassEnabled
+                      ? `最终总水量 ${finalWater}ml`
+                      : Math.abs(guide.totalVolume - recipe.grandWater) < 0.05
+                        ? `与配方 ${recipe.grandWater}ml 一致 ✓`
+                        : `配方 ${recipe.grandWater}ml · 实际 ${guide.totalVolume}ml`
                   }
                 />
               </div>

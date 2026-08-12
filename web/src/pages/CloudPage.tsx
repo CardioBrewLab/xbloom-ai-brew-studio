@@ -214,8 +214,9 @@ export default function CloudPage({ cloud, onCloudChanged, onImport }: CloudPage
                 </p>
                 {cloud?.autoLogin && (
                   <p className="mt-3 rounded-lg border border-[var(--line)] bg-[var(--bg-inset)] px-3.5 py-2.5 text-xs leading-relaxed text-[var(--tx-2)]">
-                    本机已配置自动登录账号：服务启动/请求云端时会自动登录，通常无需手动输入。
-                    若自动登录失败，请核对 .env 中的密码，或在下方手动登录其他账号。
+                    {cloud.passwordStored === false
+                      ? "已保存加密会话令牌，刷新页面后仍可使用；令牌失效时在这里重新登录。"
+                      : "本机已配置自动登录账号：服务启动或请求云端时会自动登录。"}
                   </p>
                 )}
 
@@ -285,7 +286,11 @@ export default function CloudPage({ cloud, onCloudChanged, onImport }: CloudPage
 
                 <div className="mt-6 space-y-1.5 border-t border-[var(--line)] pt-4 text-xs leading-relaxed text-[var(--tx-3)]">
                   <p>忘记密码？请在 xBloom 官方 App 或官网找回。</p>
-                  <p>账号凭证仅用于直连 xBloom 官方接口，不会被用于其他用途。</p>
+                  <p>
+                    {cloud?.passwordStored === false
+                      ? "密码仅用于本次登录并在请求结束后丢弃；站点只保存加密会话令牌。"
+                      : "账号凭证仅用于直连 xBloom 官方接口。"}
+                  </p>
                   {cloud?.proxyUsed && <p>当前通过代理访问云端服务。</p>}
                 </div>
               </div>
@@ -330,8 +335,9 @@ export default function CloudPage({ cloud, onCloudChanged, onImport }: CloudPage
             {cloud?.autoLogin && (
               <p className="flex items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--bg-inset)] px-3.5 py-2.5 text-xs text-[var(--tx-2)]">
                 <IconShield />
-                已使用本机保存的账号{cloud.email ? ` ${cloud.email} ` : " "}
-                自动登录，无需重复输入密码。
+                {cloud.passwordStored === false
+                  ? `已使用加密会话连接${cloud.email ? ` ${cloud.email}` : ""}；会话失效后重新登录。`
+                  : `已使用本机配置的账号${cloud.email ? ` ${cloud.email} ` : " "}自动登录。`}
               </p>
             )}
             {listError && (

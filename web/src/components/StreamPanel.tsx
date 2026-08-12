@@ -7,7 +7,7 @@
  *   折叠态一行摘要（豆名/粉量/总水/段数），展开才显示缩进美化的 JSON
  * - 自动 AI 审查卡（review 事件：审查中/通过/发现问题并自动修正/遗留问题，任务 #36）
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type UIEvent } from "react";
 import type { ResearchSource, ReviewFinding } from "../lib/api.js";
 import { parseCandidatesNote } from "../lib/candidates.js";
 import CandidatePickCard from "./CandidatePickCard.js";
@@ -68,6 +68,8 @@ export default function StreamPanel({
 }: StreamPanelProps) {
   const [showThinking, setShowThinking] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const autoScrollRef = useRef(true);
+  const scrollFrameRef = useRef<number | null>(null);
 
   // 任务 #120：doneNote 字符串通道解出结构化候选状态；N>1 时中栏始终渲染优选明细卡
   const candNote = parseCandidatesNote(doneNote);
@@ -76,8 +78,26 @@ export default function StreamPanel({
 
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el || !autoScrollRef.current) return;
+    if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      const current = scrollRef.current;
+      if (current && autoScrollRef.current) current.scrollTop = current.scrollHeight;
+      scrollFrameRef.current = null;
+    });
   }, [reasoning]);
+
+  useEffect(
+    () => () => {
+      if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
+    },
+    [],
+  );
+
+  const handleReasoningScroll = (event: UIEvent<HTMLDivElement>) => {
+    const el = event.currentTarget;
+    autoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 48;
+  };
 
   const empty =
     !reasoning &&
@@ -164,7 +184,10 @@ export default function StreamPanel({
         )}
 
         {error && (
-          <div className="animate-fade-up rounded-lg border border-[var(--bad)]/50 bg-[color-mix(in_srgb,var(--bad)_10%,transparent)] px-4 py-3 text-sm text-[var(--bad)]">
+          <div
+            role="alert"
+            className="animate-fade-up rounded-lg border border-[var(--bad)]/50 bg-[color-mix(in_srgb,var(--bad)_10%,transparent)] px-4 py-3 text-sm text-[var(--bad)]"
+          >
             ⚠ {error}
           </div>
         )}
@@ -180,7 +203,10 @@ export default function StreamPanel({
         {/* 多候选并行生成进度行（任务 #106）：替代/补充思考流位置；N=1 时永不下发；
             #120：优选明细卡激活时进度信息并入卡片，避免双行重复 */}
         {candidatesProgress && !showPickCard && (
-          <div className="animate-fade-up rounded-xl border border-[var(--acc-line)] bg-[var(--acc-soft)] px-4 py-3">
+          <div
+            aria-live="polite"
+            className="animate-fade-up rounded-xl border border-[var(--acc-line)] bg-[var(--acc-soft)] px-4 py-3"
+          >
             <p className="flex items-center gap-2 text-xs font-medium text-[var(--tx-1)]">
               <Spinner className="text-[var(--acc)]" />
               <span>{candidatesProgress}</span>
@@ -219,6 +245,7 @@ export default function StreamPanel({
               <div className="collapser-inner">
                 <div
                   ref={scrollRef}
+                  onScroll={handleReasoningScroll}
                   className="max-h-40 overflow-y-auto whitespace-pre-wrap px-4 pb-3 font-mono text-[11px] leading-relaxed text-[var(--tx-3)]"
                 >
                   {reasoning}
@@ -260,10 +287,13 @@ function ReviewBlock({ review }: { review: StreamReview }) {
   // 审查中：Spinner + 检查维度预告
   if (review.phase === "reviewing") {
     return (
-      <div className="animate-fade-up rounded-xl border border-[var(--acc-line)] bg-[var(--acc-soft)] px-4 py-3">
+      <div
+        aria-live="polite"
+        className="animate-fade-up rounded-xl border border-[var(--acc-line)] bg-[var(--acc-soft)] px-4 py-3"
+      >
         <p className="flex items-center gap-2 text-xs font-medium text-[var(--tx-1)]">
           <Spinner className="text-[var(--acc)]" />
-          <span>AI 自动审查中 · 检查水温/研磨/闷蒸/粉水比/时长等维度…</span>
+          <span>方案校验中 · 检查水温、研磨、闷蒸、粉水比与总时长…</span>
           <span className="animate-blink text-[var(--acc)]">●</span>
         </p>
       </div>
@@ -276,6 +306,7 @@ function ReviewBlock({ review }: { review: StreamReview }) {
 
   return (
     <div
+      aria-live="polite"
       className={`animate-fade-up rounded-xl border px-4 py-3 ${
         passed
           ? "border-[color-mix(in_srgb,var(--ok)_40%,transparent)] bg-[color-mix(in_srgb,var(--ok)_9%,transparent)]"
@@ -458,6 +489,7 @@ function ResearchBlock({ research }: { research: StreamResearch }) {
   const xhsDisclosure = xhsHits === 0 ? extractXhsDisclosure(research.summary) : "";
   return (
     <div
+      aria-live="polite"
       className={`animate-fade-up rounded-xl border px-4 py-3 ${
         degraded
           ? "border-[var(--line)] bg-[var(--bg-inset)]"

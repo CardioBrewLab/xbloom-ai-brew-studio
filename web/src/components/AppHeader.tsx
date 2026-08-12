@@ -92,7 +92,7 @@ export default function AppHeader({
                   onClick={onOpenAccount}
                   aria-label={account?.authenticated ? "个人账号" : "注册或登录"}
                   title={account?.authenticated ? account.user?.displayName : "注册或登录"}
-                  className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--line)] text-[var(--tx-2)]"
+                  className="flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--line)] text-[var(--tx-2)]"
                 >
                   <IconAccount />
                 </button>
@@ -101,7 +101,7 @@ export default function AppHeader({
                 type="button"
                 onClick={onOpenSettings}
                 aria-label="模型接口设置"
-                className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--line)] text-[var(--tx-2)]"
+                className="flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--line)] text-[var(--tx-2)]"
               >
                 <IconSettings />
               </button>
@@ -319,7 +319,7 @@ function InterfaceModeControl({
         value={value}
         onChange={(event) => onChange(event.target.value as InterfaceMode)}
         aria-label="界面版本"
-        className="h-8 rounded-lg border border-[var(--line)] bg-[var(--bg-card)] px-2 text-[11px] font-medium text-[var(--tx-2)] outline-none"
+        className={`${compact ? "h-11" : "h-8"} rounded-lg border border-[var(--line)] bg-[var(--bg-card)] px-2 text-[11px] font-medium text-[var(--tx-2)] outline-none`}
       >
         <option value="auto">自动</option>
         <option value="mobile">手机版</option>

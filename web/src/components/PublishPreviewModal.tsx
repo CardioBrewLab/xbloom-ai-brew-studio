@@ -168,6 +168,7 @@ export default function PublishPreviewModal({
     setError("");
     try {
       await api.cloudLogin(email.trim(), password);
+      setPassword("");
       onLoggedIn?.();
     } catch (e) {
       setError((e as Error).message);
@@ -338,6 +339,9 @@ export default function PublishPreviewModal({
               className={inputCls}
             />
           </Field>
+          <p className="text-[11px] leading-relaxed text-[var(--tx-3)]">
+            在线工作台仅保存加密会话令牌；密码只用于本次登录请求。
+          </p>
           <Field label="密码">
             <input
               type="password"

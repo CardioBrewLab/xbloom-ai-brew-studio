@@ -3,7 +3,14 @@
  * 全部基于 index.css 中的主题变量（亮色默认 / 暗色可选），不写死色值。
  * 规范：控件 44px / 圆角 8；卡片 12px；弹层 16px；主按钮黑白系。
  */
-import { useEffect, type CSSProperties, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  type CSSProperties,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 
 /** 输入控件统一样式：高 44px、白底 1px 描边、focus 黑色边框 + 3px 黑色 8% 光环 */
 export const inputCls =
@@ -250,14 +257,61 @@ export function Modal({
   children: ReactNode;
   wide?: boolean;
 }) {
+  const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+    const previouslyFocused = document.activeElement;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeButtonRef.current?.focus();
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      if (previouslyFocused instanceof HTMLElement && previouslyFocused.isConnected) {
+        previouslyFocused.focus();
+      }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  }, [open]);
+
+  const handleDialogKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      onCloseRef.current();
+      return;
+    }
+    if (event.key !== "Tab") return;
+
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const focusable = Array.from(
+      dialog.querySelectorAll<HTMLElement>(
+        'a[href], area[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    if (focusable.length === 0) {
+      event.preventDefault();
+      dialog.focus();
+      return;
+    }
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
 
   if (!open) return null;
   return (
@@ -271,13 +325,20 @@ export function Modal({
         className={`animate-modal-in card-surface max-h-[88vh] w-full overflow-y-auto rounded-2xl border border-[var(--line)] bg-[var(--bg-card)] ${
           wide ? "max-w-3xl" : "max-w-lg"
         }`}
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onKeyDown={handleDialogKeyDown}
       >
         <header className="sticky top-0 z-10 flex items-center justify-between border-b border-[var(--line)] bg-[var(--bg-card)] px-6 py-4">
           <div>
             {/* Modal 标题（任务 #108 P1）：display-2 展示衬线 */}
-            <h3 className="font-display text-xl font-semibold tracking-[-0.01em] text-[var(--tx-1)]">
+            <h3
+              id={titleId}
+              className="font-display text-xl font-semibold tracking-[-0.01em] text-[var(--tx-1)]"
+            >
               {title}
             </h3>
             {sub && <p className="mt-0.5 text-xs text-[var(--tx-3)]">{sub}</p>}
@@ -286,7 +347,8 @@ export function Modal({
             type="button"
             onClick={onClose}
             aria-label="关闭"
-            className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--line)] text-[var(--tx-3)] transition-colors duration-150 hover:bg-[var(--bg-inset)] hover:text-[var(--tx-1)]"
+            ref={closeButtonRef}
+            className="flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--line)] text-[var(--tx-3)] transition-colors duration-150 hover:bg-[var(--bg-inset)] hover:text-[var(--tx-1)] sm:h-8 sm:w-8"
           >
             <svg
               width="12"

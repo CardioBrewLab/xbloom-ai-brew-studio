@@ -91,6 +91,7 @@ export function relatedOf(bean: Bean, recipes: SavedRecipe[]): SavedRecipe[] {
     ? recipes.filter(
         (r) =>
           !byIdSet.has(r.id) &&
+          !r.beanId &&
           r.beanSnapshot &&
           normalizeBeanNameFE(r.beanSnapshot).includes(normalized),
       )

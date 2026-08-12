@@ -70,7 +70,7 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
             界面开小差了
           </h2>
           <p className="mt-2 text-xs leading-relaxed text-[var(--tx-3)]">
-            冲煮曲线画到一半打了个盹。你的配方数据没有丢失，
+            冲煮曲线画到一半打了个盹。已经保存的配方仍保留，
             <br />
             重试一下就能继续。
           </p>

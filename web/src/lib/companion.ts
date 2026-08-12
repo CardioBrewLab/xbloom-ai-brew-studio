@@ -1,3 +1,5 @@
+import { createAbortScope } from "./abort.js";
+
 const STORAGE_KEY = "xbloom-companion-v3";
 const LEGACY_STORAGE_KEYS = ["xbloom-companion-v2", "xbloom-companion-v1"] as const;
 
@@ -132,11 +134,17 @@ export async function companionFetch(path: string, init: RequestInit = {}): Prom
 export async function companionResearch(
   input: Record<string, unknown>,
 ): Promise<CompanionResearch> {
-  const response = await companionFetch("/api/companion/research", {
-    method: "POST",
-    body: JSON.stringify(input),
-    signal: AbortSignal.timeout(50_000),
-  });
+  const abortScope = createAbortScope([], 50_000);
+  let response: Response;
+  try {
+    response = await companionFetch("/api/companion/research", {
+      method: "POST",
+      body: JSON.stringify(input),
+      signal: abortScope.signal,
+    });
+  } finally {
+    abortScope.cleanup();
+  }
   const body = (await response.json()) as {
     ok?: boolean;
     research?: CompanionResearch;

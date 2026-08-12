@@ -23,6 +23,10 @@
     "./password-auth": {
       "types": "./dist/password-auth.d.ts",
       "default": "./dist/password-auth.js"
+    },
+    "./data-schema": {
+      "types": "./dist/data-schema.d.ts",
+      "default": "./dist/data-schema.js"
     }
   },
   "files": [

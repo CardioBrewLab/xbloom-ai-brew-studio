@@ -1,11 +1,21 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   hostedCandidateSelection,
   publicApiError,
   publicHostedFailureReason,
 } from "../src/index.ts";
 import { normalizeRecipe } from "../src/recipe.ts";
+
+test("Worker 出站 fetch 强制走公网路由", () => {
+  const config = readFileSync(
+    fileURLToPath(new URL("../wrangler.template.jsonc", import.meta.url).href),
+    "utf8",
+  );
+  assert.match(config, /"global_fetch_strictly_public"/);
+});
 
 const recipe = (grinderSize: number) =>
   normalizeRecipe({
@@ -52,7 +62,10 @@ test("public API errors keep user guidance and hide internal runtime details", (
   });
   assert.equal(publicApiError(new Error("请填写账号名")).status, 400);
   assert.equal(publicApiError(new Error("登录尝试较多，请稍后继续")).status, 429);
-  assert.equal(publicApiError(new Error("模型接口 HTTP 401：bad key")).status, 502);
+  assert.deepEqual(publicApiError(new Error("模型接口 HTTP 401：bad key")), {
+    status: 502,
+    message: "模型接口鉴权未通过，请检查 API Key 与账号权限",
+  });
   assert.deepEqual(publicApiError(new Error("D1_ERROR: SELECT password_hash failed")), {
     status: 500,
     message: "服务本次未完成请求，请稍后重试",

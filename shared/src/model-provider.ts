@@ -94,6 +94,7 @@ export interface ModelTestResult extends ModelDiscoveryResult {
 }
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+export type HostResolver = (hostname: string, signal?: AbortSignal) => Promise<string[]>;
 
 const PRIVATE_HOST_PATTERNS = [
   /^localhost$/i,
@@ -112,6 +113,90 @@ const PRIVATE_HOST_PATTERNS = [
 function isPrivateHostname(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
   return PRIVATE_HOST_PATTERNS.some((pattern) => pattern.test(host));
+}
+
+function ipv4Parts(value: string): number[] | null {
+  const parts = value.split(".");
+  if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part))) return null;
+  const numbers = parts.map(Number);
+  return numbers.every((part) => part >= 0 && part <= 255) ? numbers : null;
+}
+
+function ipv6Words(value: string): number[] | null {
+  const address = value.toLowerCase().replace(/^\[|\]$/g, "");
+  if (address.includes("%") || (address.match(/::/g)?.length ?? 0) > 1) return null;
+  const parseSide = (side: string): number[] | null => {
+    if (!side) return [];
+    const segments = side.split(":");
+    const words: number[] = [];
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index];
+      const embeddedV4 = ipv4Parts(segment);
+      if (embeddedV4) {
+        if (index !== segments.length - 1) return null;
+        words.push((embeddedV4[0] << 8) | embeddedV4[1], (embeddedV4[2] << 8) | embeddedV4[3]);
+      } else {
+        if (!/^[0-9a-f]{1,4}$/.test(segment)) return null;
+        words.push(Number.parseInt(segment, 16));
+      }
+    }
+    return words;
+  };
+  const [headText, tailText = ""] = address.split("::");
+  const head = parseSide(headText);
+  const tail = parseSide(tailText);
+  if (!head || !tail) return null;
+  if (address.includes("::")) {
+    const omitted = 8 - head.length - tail.length;
+    if (omitted < 1) return null;
+    return [...head, ...Array<number>(omitted).fill(0), ...tail];
+  }
+  return head.length === 8 ? head : null;
+}
+
+/** 公网出口只接受可路由地址；保留、文档、基准测试、组播及私网地址均拒绝。 */
+export function isPublicInternetAddress(value: string): boolean {
+  const address = value
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+  const dottedMappedV4 = /^(?:::ffff:|::)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(address)?.[1];
+  const v4 = ipv4Parts(dottedMappedV4 ?? address);
+  if (v4) {
+    const [a, b, c] = v4;
+    return !(
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 0 && c === 0) ||
+      (a === 192 && b === 0 && c === 2) ||
+      (a === 192 && b === 168) ||
+      (a === 198 && (b === 18 || b === 19)) ||
+      (a === 198 && b === 51 && c === 100) ||
+      (a === 203 && b === 0 && c === 113) ||
+      a >= 224
+    );
+  }
+  const words = ipv6Words(address);
+  if (!words) return false;
+  const mappedV4 =
+    words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff
+      ? [words[6] >> 8, words[6] & 0xff, words[7] >> 8, words[7] & 0xff]
+      : words.slice(0, 6).every((word) => word === 0)
+        ? [words[6] >> 8, words[6] & 0xff, words[7] >> 8, words[7] & 0xff]
+        : null;
+  if (mappedV4) return isPublicInternetAddress(mappedV4.join("."));
+  const first = words[0];
+  return !(
+    (first & 0xfe00) === 0xfc00 ||
+    (first & 0xffc0) === 0xfe80 ||
+    (first & 0xff00) === 0xff00 ||
+    (first === 0x2001 && words[1] === 0x0db8) ||
+    (first === 0x2001 && words[1] <= 0x002f)
+  );
 }
 
 export function normalizeModelBaseUrl(value: string, allowLoopback = false): string {
@@ -193,22 +278,130 @@ function combineSignal(signal: AbortSignal | undefined, timeoutMs: number): Abor
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
+async function resolveHostnameWithDoh(hostname: string, signal?: AbortSignal): Promise<string[]> {
+  const query = async (type: "A" | "AAAA"): Promise<string[]> => {
+    const url = new URL("https://cloudflare-dns.com/dns-query");
+    url.searchParams.set("name", hostname);
+    url.searchParams.set("type", type);
+    const response = await fetch(url, {
+      headers: { accept: "application/dns-json" },
+      redirect: "error",
+      signal: combineSignal(signal, 5_000),
+    });
+    if (!response.ok) throw new Error(`DNS 校验服务返回 HTTP ${response.status}`);
+    const body = (await response.json()) as {
+      Status?: number;
+      Answer?: Array<{ type?: number; data?: string }>;
+    };
+    if (body.Status !== 0 && body.Status !== undefined) return [];
+    const wantedType = type === "A" ? 1 : 28;
+    return (body.Answer ?? [])
+      .filter((answer) => answer.type === wantedType && typeof answer.data === "string")
+      .map((answer) => answer.data!.trim());
+  };
+  const [v4, v6] = await Promise.all([query("A"), query("AAAA")]);
+  return [...new Set([...v4, ...v6])];
+}
+
+/**
+ * Hosted 请求在出站前解析域名并拒绝任何非公网结果。后续 fetch 同时禁用重定向；
+ * Worker 还强制启用 global_fetch_strictly_public，让 DNS 重绑定后的私网目标仍按公网路由隔离。
+ */
+export async function assertPublicModelHostname(
+  baseUrl: string,
+  resolver: HostResolver = resolveHostnameWithDoh,
+  signal?: AbortSignal,
+): Promise<void> {
+  const hostname = new URL(baseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (ipv4Parts(hostname) || hostname.includes(":")) {
+    if (!isPublicInternetAddress(hostname)) {
+      throw new Error("Hosted 版模型地址解析到了非公网地址");
+    }
+    return;
+  }
+  const addresses = await resolver(hostname, signal);
+  if (!addresses.length) throw new Error("模型 API 域名未解析到公网地址");
+  if (addresses.some((address) => !isPublicInternetAddress(address))) {
+    throw new Error("Hosted 版模型地址解析到了非公网地址");
+  }
+}
+
+const MAX_SUCCESS_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_ERROR_RESPONSE_BYTES = 64 * 1024;
+
+class ModelResponseSizeError extends Error {
+  constructor(kind: "success" | "error") {
+    super(
+      kind === "success" ? "模型接口成功响应正文超过大小上限" : "模型接口错误响应正文超过大小上限",
+    );
+    this.name = "ModelResponseSizeError";
+  }
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // 响应已经结束或被读取时，取消失败不应遮蔽原始错误。
+  }
+}
+
+async function readResponseText(
+  response: Response,
+  maxBytes: number,
+  kind: "success" | "error",
+): Promise<string> {
+  const contentLength = Number(response.headers.get("content-length"));
+  if (contentLength > maxBytes) {
+    await cancelResponseBody(response);
+    throw new ModelResponseSizeError(kind);
+  }
+  if (!response.body) return "";
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let totalBytes = 0;
+  let text = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunkBytes = value?.byteLength ?? 0;
+      totalBytes += chunkBytes;
+      if (totalBytes > maxBytes) {
+        try {
+          await reader.cancel();
+        } catch {
+          // 读取器已被底层连接关闭时，继续返回稳定的大小错误类别。
+        }
+        throw new ModelResponseSizeError(kind);
+      }
+      if (value) text += decoder.decode(value, { stream: true });
+    }
+    return text + decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 async function responseFailure(response: Response): Promise<Error> {
   let detail = "";
   try {
-    const body = (await response.json()) as Record<string, unknown>;
+    const text = await readResponseText(response, MAX_ERROR_RESPONSE_BYTES, "error");
+    const body = JSON.parse(text) as Record<string, unknown>;
     const nested = body.error && typeof body.error === "object" ? body.error : undefined;
     const nestedMessage = nested && (nested as Record<string, unknown>).message;
     const candidate = nestedMessage ?? body.message ?? body.error_description;
     if (typeof candidate === "string") detail = candidate.replace(/[\r\n]+/g, " ").slice(0, 240);
-  } catch {
+  } catch (error) {
+    if (error instanceof ModelResponseSizeError) throw error;
     // 非 JSON 错误页只披露状态码，避免把网关 HTML 回传到界面。
   }
   return new Error(`模型接口 HTTP ${response.status}${detail ? `：${detail}` : ""}`);
 }
 
 async function modelResponseJson(response: Response, action: string): Promise<unknown> {
-  const text = await response.text();
+  const text = await readResponseText(response, MAX_SUCCESS_RESPONSE_BYTES, "success");
   try {
     return JSON.parse(text);
   } catch {
@@ -317,7 +510,12 @@ function discoveryPageUrl(
 
 export async function discoverModels(
   input: ModelConnection,
-  options: { fetcher?: FetchLike; signal?: AbortSignal; allowLoopback?: boolean } = {},
+  options: {
+    fetcher?: FetchLike;
+    signal?: AbortSignal;
+    allowLoopback?: boolean;
+    resolveHostname?: HostResolver;
+  } = {},
 ): Promise<ModelDiscoveryResult> {
   const started = Date.now();
   const provider = input.provider || detectModelProvider(input.baseUrl);
@@ -328,6 +526,9 @@ export async function discoverModels(
     apiKey: input.apiKey.trim(),
   };
   if (!connection.apiKey) throw new Error("请填写 API Key");
+  if (!options.allowLoopback) {
+    await assertPublicModelHostname(connection.baseUrl, options.resolveHostname, options.signal);
+  }
   const fetcher = options.fetcher ?? fetch;
   const candidates = [connection.baseUrl];
   const parsedBaseUrl = new URL(connection.baseUrl);
@@ -352,6 +553,7 @@ export async function discoverModels(
         response = await fetcher(discoveryPageUrl(candidateBaseUrl, provider, pageToken, afterId), {
           method: "GET",
           headers: authHeaders(connection),
+          redirect: "error",
           signal: mayTryV1 ? combineSignal(discoverySignal, 5_000) : discoverySignal,
         });
       } catch (error) {
@@ -463,6 +665,7 @@ export async function generateModelText(
     signal?: AbortSignal;
     timeoutMs?: number;
     allowLoopback?: boolean;
+    resolveHostname?: HostResolver;
     temperature?: number;
     maxTokens?: number;
   } = {},
@@ -474,6 +677,9 @@ export async function generateModelText(
     model: input.model.trim(),
   };
   if (!connection.apiKey || !connection.model) throw new Error("请填写 API Key 并选择模型");
+  if (!options.allowLoopback) {
+    await assertPublicModelHostname(connection.baseUrl, options.resolveHostname, options.signal);
+  }
   const fetcher = options.fetcher ?? fetch;
   let url: string;
   let body: unknown;
@@ -532,6 +738,7 @@ export async function generateModelText(
     method: "POST",
     headers: authHeaders(connection),
     body: JSON.stringify(body),
+    redirect: "error",
     signal: combineSignal(options.signal, options.timeoutMs ?? 120_000),
   });
   if (!response.ok) throw await responseFailure(response);
@@ -542,7 +749,12 @@ export async function generateModelText(
 
 export async function testModelConnection(
   input: ModelConnection & { model: string },
-  options: { fetcher?: FetchLike; signal?: AbortSignal; allowLoopback?: boolean } = {},
+  options: {
+    fetcher?: FetchLike;
+    signal?: AbortSignal;
+    allowLoopback?: boolean;
+    resolveHostname?: HostResolver;
+  } = {},
 ): Promise<ModelTestResult> {
   const started = Date.now();
   const reasoningModel =

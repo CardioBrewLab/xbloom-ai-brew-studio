@@ -28,6 +28,7 @@ function readFavorites(): string[] {
 export interface HistoryListProps {
   items: SavedRecipe[] | null;
   error: string;
+  onRetry: () => void;
   onLoad: (entry: SavedRecipe) => void;
   onDelete: (id: string) => void;
   /** 对比勾选 */
@@ -40,6 +41,7 @@ export interface HistoryListProps {
 export default function HistoryList({
   items,
   error,
+  onRetry,
   onLoad,
   onDelete,
   compareIds,
@@ -230,7 +232,13 @@ export default function HistoryList({
               </button>
               <button
                 type="button"
-                onClick={() => onDelete(entry.id)}
+                onClick={() => {
+                  if (
+                    window.confirm(`确认删除“${entry.recipe.name}”？此操作会移除这条历史记录。`)
+                  ) {
+                    onDelete(entry.id);
+                  }
+                }}
                 className="rounded-md border border-[var(--line)] px-2 py-1 text-[11px] text-[var(--tx-3)] transition-colors hover:border-[var(--bad)]/60 hover:text-[var(--bad)]"
               >
                 删除
@@ -290,7 +298,18 @@ export default function HistoryList({
             </div>
           </div>
         )}
-        {error && <p className="px-2 py-3 text-center text-xs text-[var(--tx-3)]">{error}</p>}
+        {error && (
+          <div className="px-2 py-3 text-center text-xs text-[var(--tx-3)]" role="alert">
+            <p>{error}</p>
+            <button
+              type="button"
+              onClick={onRetry}
+              className="mt-2 rounded-md border border-[var(--line-strong)] px-3 py-1.5 font-medium text-[var(--tx-2)] hover:bg-[var(--bg-inset)]"
+            >
+              重新加载
+            </button>
+          </div>
+        )}
         {!error && items === null && (
           <div className="space-y-2" aria-label="冲煮历史加载中">
             {[0, 1, 2].map((index) => (

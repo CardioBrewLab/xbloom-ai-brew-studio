@@ -222,10 +222,32 @@ try {
   worker.stderr.on("data", (chunk) => (workerOutput += chunk));
   await waitUntilReady();
 
+  const home = await request("/", { requestOrigin: null });
+  assert.equal(home.response.status, 200);
+  assert.match(
+    home.response.headers.get("content-security-policy") ?? "",
+    /frame-ancestors 'none'/,
+  );
+  assert.match(
+    home.response.headers.get("content-security-policy") ?? "",
+    /http:\/\/127\.0\.0\.1:8787/,
+  );
+  assert.equal(home.response.headers.get("x-frame-options"), "DENY");
+  assert.equal(home.response.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(home.response.headers.get("referrer-policy"), "same-origin");
+  assert.match(home.response.headers.get("strict-transport-security") ?? "", /max-age=31536000/);
+
   const status = await request("/api/status", { requestOrigin: null });
   assert.equal(status.response.status, 200);
+  assert.equal(status.response.headers.get("x-frame-options"), "DENY");
+  assert.equal(status.response.headers.get("x-content-type-options"), "nosniff");
   assert.equal(status.payload.version, "hosted-0.2.1");
   assert.equal(status.payload.capabilities.auth, true);
+
+  for (let attempt = 0; attempt < 22; attempt += 1) {
+    const invalidGenerate = await request("/api/generate", { method: "POST", body: {} });
+    assert.equal(invalidGenerate.response.status, 400);
+  }
 
   const crossSite = await request("/api/beans", {
     method: "POST",
@@ -302,6 +324,12 @@ try {
     body: { name: "User One Bean", stockGrams: 100 },
   });
   assert.equal(bean1.response.status, 200);
+  const invalidBean = await request("/api/beans", {
+    jar: user1,
+    method: "POST",
+    body: { name: "Invalid Bean", stockGrams: -1 },
+  });
+  assert.equal(invalidBean.response.status, 400);
 
   const recipe1 = await request("/api/recipes", {
     jar: user1,
@@ -309,6 +337,181 @@ try {
     body: { recipe: validRecipe, model: "integration-model" },
   });
   assert.equal(recipe1.response.status, 200);
+  const danglingBeanRecipe = await request("/api/recipes", {
+    jar: user1,
+    method: "POST",
+    body: { recipe: validRecipe, beanId: crypto.randomUUID() },
+  });
+  assert.equal(danglingBeanRecipe.response.status, 400);
+
+  const invalidRecipePatch = await request(`/api/recipes/${recipe1.payload.id}`, {
+    jar: user1,
+    method: "PATCH",
+    body: { cloudTableId: "not-a-table", pairId: crypto.randomUUID() },
+  });
+  assert.equal(invalidRecipePatch.response.status, 400);
+
+  const normalizedRecipe = await request("/api/recipes", {
+    jar: user1,
+    method: "POST",
+    body: {
+      recipe: {
+        ...validRecipe,
+        name: "Normalized Brew",
+        pours: validRecipe.pours.map((pour) => ({ ...pour, temperature: 120 })),
+      },
+    },
+  });
+  assert.equal(normalizedRecipe.response.status, 200);
+  assert.match(normalizedRecipe.payload.warning ?? "", /安全边界/);
+  const normalizedRows = await request("/api/recipes", { jar: user1, requestOrigin: null });
+  assert.equal(
+    normalizedRows.payload.recipes.find((entry) => entry.id === normalizedRecipe.payload.id).recipe
+      .pours[0].temperature,
+    95,
+  );
+
+  const invalidFeedback = await request(`/api/recipes/${recipe1.payload.id}/feedback`, {
+    jar: user1,
+    method: "POST",
+    body: { rating: 0, taste: [] },
+  });
+  assert.equal(invalidFeedback.response.status, 400);
+  const duplicateFeedback = await request(`/api/recipes/${recipe1.payload.id}/feedback`, {
+    jar: user1,
+    method: "POST",
+    body: { rating: 4, taste: ["平衡", "平衡"] },
+  });
+  assert.equal(duplicateFeedback.response.status, 400);
+  await Promise.all([
+    request(`/api/recipes/${recipe1.payload.id}/feedback`, {
+      jar: user1,
+      method: "POST",
+      body: { rating: 4, taste: ["平衡"], note: "A" },
+    }),
+    request(`/api/recipes/${recipe1.payload.id}/feedback`, {
+      jar: user1,
+      method: "POST",
+      body: { rating: 5, taste: ["风味不突出"], note: "B" },
+    }),
+  ]);
+  const feedbackRows = await request("/api/recipes", { jar: user1, requestOrigin: null });
+  assert.equal(
+    feedbackRows.payload.recipes.find((entry) => entry.id === recipe1.payload.id).feedbacks.length,
+    2,
+  );
+  const parentFeedbackId = feedbackRows.payload.recipes.find(
+    (entry) => entry.id === recipe1.payload.id,
+  ).feedbacks[0].id;
+  const missingParent = await request("/api/recipes", {
+    jar: user1,
+    method: "POST",
+    body: {
+      clientRequestId: crypto.randomUUID(),
+      recipe: { ...validRecipe, name: "Missing Parent" },
+      parentId: crypto.randomUUID(),
+    },
+  });
+  assert.equal(missingParent.response.status, 404);
+  const sourceWithoutParent = await request("/api/recipes", {
+    jar: user1,
+    method: "POST",
+    body: {
+      clientRequestId: crypto.randomUUID(),
+      recipe: { ...validRecipe, name: "Source Without Parent" },
+      sourceFeedbackId: parentFeedbackId,
+    },
+  });
+  assert.equal(sourceWithoutParent.response.status, 400);
+  const unknownParentFeedback = await request("/api/recipes", {
+    jar: user1,
+    method: "POST",
+    body: {
+      clientRequestId: crypto.randomUUID(),
+      recipe: { ...validRecipe, name: "Unknown Parent Feedback" },
+      parentId: recipe1.payload.id,
+      sourceFeedbackId: crypto.randomUUID(),
+    },
+  });
+  assert.equal(unknownParentFeedback.response.status, 400);
+  const childRequestId = crypto.randomUUID();
+  const childRecipeBody = {
+    id: "payload-must-not-override-row-id",
+    createdAt: "2000-01-01T00:00:00.000Z",
+    clientRequestId: childRequestId,
+    recipe: { ...validRecipe, name: "Feedback Child" },
+    parentId: recipe1.payload.id,
+    sourceFeedbackId: parentFeedbackId,
+    feedbacks: [{ id: "injected" }],
+  };
+  const childRecipe = await request("/api/recipes", {
+    jar: user1,
+    method: "POST",
+    body: childRecipeBody,
+  });
+  assert.equal(childRecipe.payload.id, childRequestId);
+  assert.equal(childRecipe.payload.version, 2);
+  const invalidResultPatch = await request(
+    `/api/recipes/${recipe1.payload.id}/feedback/${parentFeedbackId}`,
+    {
+      jar: user1,
+      method: "PATCH",
+      body: { resultingRecipeId: "not-a-uuid" },
+    },
+  );
+  assert.equal(invalidResultPatch.response.status, 400);
+  const missingResultPatch = await request(
+    `/api/recipes/${recipe1.payload.id}/feedback/${parentFeedbackId}`,
+    {
+      jar: user1,
+      method: "PATCH",
+      body: { resultingRecipeId: crypto.randomUUID() },
+    },
+  );
+  assert.equal(missingResultPatch.response.status, 404);
+  const competingChildId = crypto.randomUUID();
+  const competingChild = await request("/api/recipes", {
+    jar: user1,
+    method: "POST",
+    body: {
+      ...childRecipeBody,
+      clientRequestId: competingChildId,
+      recipe: { ...validRecipe, name: "Competing Feedback Child" },
+    },
+  });
+  assert.equal(competingChild.payload.id, competingChildId);
+  const childRetry = await request("/api/recipes", {
+    jar: user1,
+    method: "POST",
+    body: childRecipeBody,
+  });
+  assert.equal(childRetry.payload.id, childRequestId);
+  const versionRows = await request("/api/recipes", { jar: user1, requestOrigin: null });
+  const storedChild = versionRows.payload.recipes.find((entry) => entry.id === childRequestId);
+  const storedParent = versionRows.payload.recipes.find((entry) => entry.id === recipe1.payload.id);
+  assert.equal(storedChild.id, childRequestId);
+  assert.equal(storedChild.createdAt === "2000-01-01T00:00:00.000Z", false);
+  assert.equal(storedChild.version, 2);
+  assert.equal(storedChild.feedbacks, undefined);
+  assert.equal(
+    storedParent.feedbacks.find((feedback) => feedback.id === parentFeedbackId).resultingRecipeId,
+    childRequestId,
+  );
+
+  for (let index = 2; index < 50; index += 1) {
+    const accepted = await request(`/api/recipes/${recipe1.payload.id}/feedback`, {
+      jar: user1,
+      method: "POST",
+      body: { rating: 4, taste: ["平衡"], note: `limit-${index}` },
+    });
+    assert.equal(accepted.response.status, 200);
+  }
+  const feedbackLimit = await request(`/api/recipes/${recipe1.payload.id}/feedback`, {
+    jar: user1,
+    method: "POST",
+    body: { rating: 4, taste: ["平衡"], note: "over-limit" },
+  });
+  assert.equal(feedbackLimit.response.status, 409);
 
   const recipeRequestId = crypto.randomUUID();
   const idempotentRecipeBody = {
@@ -383,6 +586,17 @@ try {
     preview.payload.pours.reduce((sum, pour) => sum + pour.volume, 0),
     225,
   );
+  const invalidPreview = await request("/api/cloud/publish-preview", {
+    jar: user1,
+    method: "POST",
+    body: {
+      recipe: {
+        ...validRecipe,
+        pours: validRecipe.pours.map((pour) => ({ ...pour, flowRate: 9 })),
+      },
+    },
+  });
+  assert.equal(invalidPreview.response.status, 400);
 
   const cloudStatus1 = await request("/api/cloud/status", { jar: user1, requestOrigin: null });
   assert.equal(cloudStatus1.response.status, 200);
@@ -410,6 +624,20 @@ try {
     method: "POST",
     body: { name: "User Two Bean", stockGrams: 80 },
   });
+  const user2Bean = (await request("/api/beans", { jar: user2, requestOrigin: null })).payload
+    .beans[0];
+  await Promise.all([
+    request(`/api/beans/${user2Bean.id}/consume`, {
+      jar: user2,
+      method: "POST",
+      body: { grams: 10, doseGrams: 10 },
+    }),
+    request(`/api/beans/${user2Bean.id}/consume`, {
+      jar: user2,
+      method: "POST",
+      body: { grams: 10, doseGrams: 10 },
+    }),
+  ]);
   const user1Beans = await request("/api/beans", { jar: user1, requestOrigin: null });
   const user2Beans = await request("/api/beans", { jar: user2, requestOrigin: null });
   assert.deepEqual(
@@ -420,6 +648,7 @@ try {
     user2Beans.payload.beans.map((bean) => bean.name),
     ["User Two Bean"],
   );
+  assert.equal(user2Beans.payload.beans[0].stockGrams, 60);
 
   const logout1 = await request("/api/auth/logout", { jar: user1, method: "POST", body: {} });
   assert.equal(logout1.response.status, 200);
@@ -453,7 +682,7 @@ try {
   assert.doesNotMatch(JSON.stringify(wrongPassword.payload), /hash|salt|iteration/i);
 
   console.log(
-    "[hosted-integration] PASS: auth, sessions, CSRF/proxy, per-user data isolation, provider onboarding and xBloom preview",
+    "[hosted-integration] PASS: security headers, auth, quotas, validated persistence, concurrent updates, isolation, provider onboarding and xBloom preview",
   );
 } catch (error) {
   console.error(workerOutput.slice(-8_000));

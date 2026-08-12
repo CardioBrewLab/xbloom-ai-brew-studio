@@ -136,8 +136,8 @@ export function GrinderScale({
   const [c40Note, setC40Note] = useState<string | null>(null);
 
   function applyC40() {
-    const clicks = Math.round(Number(c40Input));
-    if (c40Input.trim() === "" || !Number.isFinite(clicks) || clicks < 0) {
+    const clicks = validC40Clicks(c40Input);
+    if (clicks === null) {
       setC40Note("请输入有效的 C40 格数（0-40）");
       return;
     }
@@ -259,7 +259,8 @@ export function RatioCalculator({
   onGrandWater: (ml: number) => void;
 }) {
   const ratio = doseGrams > 0 ? grandWater / doseGrams : 15.6;
-  const displayRatio = Math.max(12, Math.min(20, Math.round(ratio * 10) / 10));
+  const sliderRatio = clampRatioSliderValue(ratio);
+  const ratioOutOfRange = ratio < BYPASS_RATIO_RANGE.min || ratio > BYPASS_RATIO_RANGE.max;
 
   return (
     <div className="rounded-xl border border-[var(--line)] bg-[var(--bg-inset)] p-4">
@@ -268,7 +269,7 @@ export function RatioCalculator({
           粉水比计算器
         </span>
         <span className="tnum text-sm font-semibold text-[var(--tx-1)]">
-          1:{displayRatio.toFixed(1)}
+          1:{ratio.toFixed(1)}
           <span className="ml-2 text-[11px] font-normal text-[var(--tx-3)]">
             {doseGrams}g → {grandWater}ml
           </span>
@@ -279,7 +280,7 @@ export function RatioCalculator({
           min={12}
           max={20}
           step={0.1}
-          value={displayRatio}
+          value={sliderRatio}
           onChange={(r) => onGrandWater(Math.round(doseGrams * r * 10) / 10)}
         />
         <div className="tnum mt-1 flex justify-between text-[11px] text-[var(--tx-3)]">
@@ -287,9 +288,29 @@ export function RatioCalculator({
           <span>1:15.6 经典</span>
           <span>1:20 清爽</span>
         </div>
+        {ratioOutOfRange && (
+          <p className="mt-2 text-[11px] text-[var(--warn)]">
+            当前比例超出建议区间 1:{BYPASS_RATIO_RANGE.min}–1:{BYPASS_RATIO_RANGE.max}
+            ，滑杆已钳位到可用范围。
+          </p>
+        )}
       </div>
     </div>
   );
+}
+
+/** C40 只接受 0–40 的整数；超范围保持原输入并显示错误，避免静默改写刻度。 */
+export function validC40Clicks(value: string): number | null {
+  const parsed = Number(value);
+  return value.trim() !== "" && Number.isInteger(parsed) && parsed >= 0 && parsed <= 40
+    ? parsed
+    : null;
+}
+
+/** 标题保留真实比例，滑杆只使用 1:12–1:20 的可用值。 */
+export function clampRatioSliderValue(ratio: number): number {
+  const rounded = Math.round(ratio * 10) / 10;
+  return Math.max(BYPASS_RATIO_RANGE.min, Math.min(BYPASS_RATIO_RANGE.max, rounded));
 }
 
 // ---------------------------------------------------------------------------

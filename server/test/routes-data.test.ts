@@ -26,6 +26,7 @@ import {
   deriveVersion,
   FeedbackSchema,
   isValidPairPatch,
+  MAX_FEEDBACKS_PER_RECIPE,
   normalizeRecipeSaveRequestId,
   loadAll,
   saveAll,
@@ -339,6 +340,8 @@ describe("反馈味型与 schema 校验", () => {
     assert.equal(FeedbackSchema.safeParse({ rating: 6, taste: ["偏酸"] }).success, false);
     assert.equal(FeedbackSchema.safeParse({ rating: 4, taste: [] }).success, false);
     assert.equal(FeedbackSchema.safeParse({ rating: 4, taste: ["太淡"] }).success, false);
+    assert.equal(FeedbackSchema.safeParse({ rating: 4, taste: ["平衡", "平衡"] }).success, false);
+    assert.equal(MAX_FEEDBACKS_PER_RECIPE, 50);
   });
 });
 

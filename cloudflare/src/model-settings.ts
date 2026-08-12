@@ -29,6 +29,32 @@ interface ModelSettingsRow {
   updated_at: string;
 }
 
+interface StoredApiKeys {
+  primary: string;
+  fallback: string;
+}
+
+export function modelValidationTargets(
+  primaryModel: string,
+  fallbackModel: string,
+  thirdModel: string,
+  primaryApiKey: string,
+  fallbackApiKey: string,
+): Array<{ model: string; apiKey: string }> {
+  const targets = [
+    { model: primaryModel, apiKey: primaryApiKey },
+    ...(fallbackModel ? [{ model: fallbackModel, apiKey: fallbackApiKey }] : []),
+    ...(thirdModel ? [{ model: thirdModel, apiKey: fallbackApiKey }] : []),
+  ];
+  const seen = new Set<string>();
+  return targets.filter((target) => {
+    const identity = `${target.model}\0${target.apiKey}`;
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
 export interface PublicModelSettings {
   provider: ModelProvider;
   baseUrl: string;
@@ -76,6 +102,29 @@ function apiKeyValue(value: unknown): string | null {
   return result;
 }
 
+export function parseStoredApiKeys(value: string): StoredApiKeys {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    if (typeof parsed.primary === "string" && parsed.primary) {
+      return {
+        primary: parsed.primary,
+        fallback:
+          typeof parsed.fallback === "string" && parsed.fallback ? parsed.fallback : parsed.primary,
+      };
+    }
+  } catch {
+    // 旧版载荷是单一 API Key 明文（外层仍由 AES-GCM 加密），按主/备用共用迁移。
+  }
+  return { primary: value, fallback: value };
+}
+
+async function decryptedApiKeys(
+  env: ModelSettingsEnv,
+  row: ModelSettingsRow,
+): Promise<StoredApiKeys> {
+  return parseStoredApiKeys(await decryptText(row.encrypted_api_key, encryptionSecret(env)));
+}
+
 async function bodyObject(request: Request): Promise<Record<string, unknown>> {
   const text = await request.text();
   if (text.length > 32_768) throw new Error("请求体过大");
@@ -103,6 +152,7 @@ export async function publicModelSettings(
 ): Promise<PublicModelSettings> {
   const row = user ? await settingsRow(env, user.id) : null;
   if (row) {
+    const keys = await decryptedApiKeys(env, row);
     return {
       provider: row.provider,
       baseUrl: row.base_url,
@@ -110,7 +160,7 @@ export async function publicModelSettings(
       fallbackModel: row.fallback_model,
       thirdModel: row.third_model,
       apiKeyConfigured: Boolean(row.encrypted_api_key),
-      fallbackApiKeyConfigured: false,
+      fallbackApiKeyConfigured: Boolean(keys.fallback),
       source: "user",
       localOverridePresent: true,
       localOverrideValid: true,
@@ -163,17 +213,25 @@ export async function modelConnectionForUser(
   env: ModelSettingsEnv,
   user: AuthUser | null,
 ): Promise<
-  (ModelConnection & { model: string; fallbackModel: string; thirdModel: string }) | null
+  | (ModelConnection & {
+      model: string;
+      fallbackModel: string;
+      thirdModel: string;
+      fallbackApiKey: string;
+    })
+  | null
 > {
   const row = user ? await settingsRow(env, user.id) : null;
   if (row) {
+    const keys = await decryptedApiKeys(env, row);
     return {
       provider: row.provider,
       baseUrl: row.base_url,
       model: row.model,
       fallbackModel: row.fallback_model,
       thirdModel: row.third_model,
-      apiKey: await decryptText(row.encrypted_api_key, encryptionSecret(env)),
+      apiKey: keys.primary,
+      fallbackApiKey: keys.fallback,
     };
   }
   if (user) return null;
@@ -185,6 +243,7 @@ export async function modelConnectionForUser(
       fallbackModel: "",
       thirdModel: "",
       apiKey: env.LLM_API_KEY,
+      fallbackApiKey: env.LLM_API_KEY,
     };
   }
   return null;
@@ -204,9 +263,7 @@ async function draftConnection(
     : false;
   const apiKey =
     suppliedKey ??
-    (sameEndpoint && existing
-      ? await decryptText(existing.encrypted_api_key, encryptionSecret(env))
-      : null);
+    (sameEndpoint && existing ? (await decryptedApiKeys(env, existing)).primary : null);
   if (!apiKey) throw new Error("更换接口时请填写该接口的 API Key");
   return {
     provider,
@@ -259,8 +316,31 @@ export async function handleModelSettingsRoute(
     const model = stringField(body.model, "主模型", 200);
     const fallbackModel = optionalModel(body.fallbackModel);
     const thirdModel = optionalModel(body.thirdModel);
-    const test = await testModelConnection({ ...connection, model });
-    const encrypted = await encryptText(connection.apiKey, encryptionSecret(env));
+    const existing = await settingsRow(env, user.id);
+    const sameEndpoint = existing
+      ? equivalentModelBaseUrls(existing.base_url, connection.baseUrl) &&
+        existing.provider === connection.provider
+      : false;
+    const existingKeys = existing && sameEndpoint ? await decryptedApiKeys(env, existing) : null;
+    const suppliedFallbackKey = apiKeyValue(body.fallbackApiKey);
+    const fallbackApiKey = suppliedFallbackKey ?? existingKeys?.fallback ?? connection.apiKey;
+    const validationTargets = modelValidationTargets(
+      model,
+      fallbackModel,
+      thirdModel,
+      connection.apiKey,
+      fallbackApiKey,
+    );
+    let primaryTest: Awaited<ReturnType<typeof testModelConnection>> | null = null;
+    for (const target of validationTargets) {
+      const tested = await testModelConnection({ ...connection, ...target });
+      if (target.model === model && target.apiKey === connection.apiKey) primaryTest = tested;
+    }
+    if (!primaryTest) throw new Error("主模型连接测试未完成");
+    const encrypted = await encryptText(
+      JSON.stringify({ primary: connection.apiKey, fallback: fallbackApiKey }),
+      encryptionSecret(env),
+    );
     const now = new Date().toISOString();
     await env.DB.prepare(
       `INSERT INTO user_model_settings(user_id,provider,base_url,model,fallback_model,third_model,encrypted_api_key,updated_at)
@@ -283,7 +363,7 @@ export async function handleModelSettingsRoute(
     return responseJson({
       ok: true,
       settings: await publicModelSettings(env, user),
-      test: { model: test.model, latencyMs: test.latencyMs },
+      test: { model: primaryTest.model, latencyMs: primaryTest.latencyMs },
     });
   }
   if (request.method === "DELETE" && path === "/api/settings/llm") {

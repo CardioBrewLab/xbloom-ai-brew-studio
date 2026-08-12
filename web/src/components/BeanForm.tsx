@@ -217,6 +217,7 @@ export interface BeanFormProps {
   defaultModel: string;
   generating: boolean;
   onGenerate: (req: GenerateRequest) => void;
+  onCancel: () => void;
   /** 豆库列表（由外层统一拉取） */
   beans: Bean[];
   /** 跳转豆库管理页 */
@@ -236,6 +237,7 @@ export default function BeanForm({
   defaultModel,
   generating,
   onGenerate,
+  onCancel,
   beans,
   onOpenBeans,
   collapsed = false,
@@ -526,7 +528,7 @@ export default function BeanForm({
             className="flex w-full items-center justify-between px-4 py-3 text-xs font-medium text-[var(--tx-2)] transition-colors duration-150 hover:text-[var(--tx-1)]"
           >
             <span>
-              不会填？粘贴豆子信息，AI 帮你归类
+              豆子信息太散？粘贴后自动整理字段
               <span
                 className={
                   parsePhase === "applied"
@@ -586,10 +588,10 @@ export default function BeanForm({
                   >
                     {parsePhase === "loading" ? (
                       <>
-                        <Spinner className="h-3 w-3" /> AI 归类中…
+                        <Spinner className="h-3 w-3" /> 正在整理…
                       </>
                     ) : (
-                      "AI 分类"
+                      "整理字段"
                     )}
                   </button>
                 </div>
@@ -823,17 +825,11 @@ export default function BeanForm({
       <div className="shrink-0 space-y-2 border-t border-[var(--line)] bg-[var(--bg-card)] p-4">
         <button
           type="button"
-          onClick={submit}
-          disabled={generating || !description.trim()}
-          className={`${btnPrimary} w-full`}
+          onClick={generating ? onCancel : submit}
+          disabled={!generating && !description.trim()}
+          className={`${generating ? btnGhost : btnPrimary} w-full ${generating ? "h-12" : ""}`}
         >
-          {generating ? (
-            <>
-              <Spinner /> 正在生成配方…
-            </>
-          ) : (
-            `用 ${selectedMode.eyebrow} 生成配方`
-          )}
+          {generating ? "停止本次生成" : `用 ${selectedMode.eyebrow} 生成配方`}
         </button>
         <p className="text-center text-[11px] text-[var(--tx-3)]">
           Ctrl / ⌘ + Enter 快速生成 · 无需选豆，有描述即可

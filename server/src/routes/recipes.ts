@@ -17,6 +17,11 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
+import {
+  FeedbackInputSchema,
+  MAX_FEEDBACKS_PER_RECIPE,
+  TASTE_TAGS,
+} from "../../../shared/dist/data-schema.js";
 import { atomicWriteJson, loadJsonArray } from "../lib/data-io.js";
 import { clampRecipe, durationWarning } from "../lib/safety.js";
 import { ROASTER_REFERENCE_MAX, sanitizeBrewRationale } from "./generate.js";
@@ -45,26 +50,10 @@ export function normalizeRecipeSaveRequestId(value: unknown): string | undefined
 }
 
 /** 冲煮反馈味型枚举（generate 重生成调参分支的输入）：五味型 + 三枚风味维度标签 */
-export const TASTE_TAGS = [
-  "偏酸",
-  "偏苦",
-  "偏弱",
-  "过强",
-  "平衡",
-  "香气不足",
-  "风味不突出",
-  "甜感不足",
-] as const;
+export { MAX_FEEDBACKS_PER_RECIPE, TASTE_TAGS };
 export type TasteTag = (typeof TASTE_TAGS)[number];
 
-export const FeedbackSchema = z.object({
-  /** 综合评分 1-5 */
-  rating: z.number().int().min(1).max(5),
-  /** 味型标签（可多选） */
-  taste: z.array(z.enum(TASTE_TAGS)).min(1),
-  /** 自由文字补充 */
-  note: z.string().optional(),
-});
+export const FeedbackSchema = FeedbackInputSchema;
 export type BrewFeedback = z.infer<typeof FeedbackSchema> & {
   /** feedback 条目唯一 id（版本链追溯用） */
   id?: string;
@@ -216,6 +205,13 @@ recipesRouter.post("/api/recipes", (req: Request, res: Response) => {
       ? list.find((entry) => entry.id === clientRequestId)
       : undefined;
     if (existing) {
+      if (
+        existing.parentId &&
+        existing.sourceFeedbackId &&
+        backfillResulting(list, existing.parentId, existing.sourceFeedbackId, existing.id)
+      ) {
+        saveAll(list);
+      }
       const warning = durationWarning(existing.recipe);
       res.json({
         ok: true,
@@ -230,17 +226,52 @@ recipesRouter.post("/api/recipes", (req: Request, res: Response) => {
     if (body.name && typeof body.name === "string" && body.name.trim()) {
       recipe.name = body.name.trim();
     }
-    // 版本链：parent 不存在时忽略 parentId（不产生悬空引用）
-    const parent =
-      typeof body.parentId === "string" ? list.find((r) => r.id === body.parentId) : undefined;
+    const linkedBeanId = typeof body.beanId === "string" ? body.beanId.trim() : "";
+    if (linkedBeanId && !loadBeans().some((bean) => bean.id === linkedBeanId)) {
+      res.status(400).json({ ok: false, error: `豆档案 ${linkedBeanId} 不存在` });
+      return;
+    }
+    const parentId =
+      body.parentId === undefined ? undefined : normalizeRecipeSaveRequestId(body.parentId);
+    if (body.parentId !== undefined && !parentId) {
+      res.status(400).json({ ok: false, error: "parentId 格式有误" });
+      return;
+    }
+    const sourceFeedbackId =
+      body.sourceFeedbackId === undefined
+        ? undefined
+        : normalizeRecipeSaveRequestId(body.sourceFeedbackId);
+    if (body.sourceFeedbackId !== undefined && !sourceFeedbackId) {
+      res.status(400).json({ ok: false, error: "sourceFeedbackId 格式有误" });
+      return;
+    }
+    if (sourceFeedbackId && !parentId) {
+      res.status(400).json({ ok: false, error: "sourceFeedbackId 需要同时提供 parentId" });
+      return;
+    }
+    const entryId = clientRequestId ?? crypto.randomUUID();
+    if (parentId === entryId) {
+      res.status(400).json({ ok: false, error: "配方不能引用自身作为父版本" });
+      return;
+    }
+    const parent = parentId ? list.find((recipeEntry) => recipeEntry.id === parentId) : undefined;
+    if (parentId && !parent) {
+      res.status(404).json({ ok: false, error: "父配方不存在" });
+      return;
+    }
+    if (
+      sourceFeedbackId &&
+      !parent?.feedbacks?.some((feedback) => feedback.id === sourceFeedbackId)
+    ) {
+      res.status(400).json({ ok: false, error: "父配方中不存在对应反馈" });
+      return;
+    }
     const entry: StoredRecipe = {
-      id: clientRequestId ?? crypto.randomUUID(),
+      id: entryId,
       createdAt: new Date().toISOString(),
       recipe,
       ...(parent ? { parentId: parent.id, version: deriveVersion(parent) } : {}),
-      ...(parent && typeof body.sourceFeedbackId === "string" && body.sourceFeedbackId
-        ? { sourceFeedbackId: body.sourceFeedbackId }
-        : {}),
+      ...(parent && sourceFeedbackId ? { sourceFeedbackId } : {}),
       ...(typeof body.changeNotes === "string" && body.changeNotes.trim()
         ? { changeNotes: body.changeNotes.trim().slice(0, 120) }
         : {}),
@@ -267,10 +298,8 @@ recipesRouter.post("/api/recipes", (req: Request, res: Response) => {
       ...(typeof body.cloudTableId === "string" && /^\d{1,20}$/.test(body.cloudTableId)
         ? { cloudTableId: body.cloudTableId }
         : {}),
-      // 关联豆档案 id 透传落库（任务 #50）：非空才落字段，不校验豆存在性
-      ...(typeof body.beanId === "string" && body.beanId.trim()
-        ? { beanId: body.beanId.trim() }
-        : {}),
+      // 关联豆档案 id 仅在当前豆库真实存在时落库，防止生成历史形成悬空引用。
+      ...(linkedBeanId ? { beanId: linkedBeanId } : {}),
       // 烘焙商参考方案原文透传落库（任务 #57）：非空才落字段，超长截断
       ...(() => {
         const roasterReference = sanitizeRoasterReference(body.roasterReference);
@@ -399,6 +428,13 @@ recipesRouter.post("/api/recipes/:id/feedback", (req: Request, res: Response) =>
     return;
   }
   entry.feedbacks = entry.feedbacks ?? [];
+  if (entry.feedbacks.length >= MAX_FEEDBACKS_PER_RECIPE) {
+    res.status(409).json({
+      ok: false,
+      error: `每个配方最多保留 ${MAX_FEEDBACKS_PER_RECIPE} 条反馈`,
+    });
+    return;
+  }
   const fb = buildFeedbackEntry(parsed.data);
   entry.feedbacks.push(fb);
   saveAll(list);
@@ -410,7 +446,8 @@ recipesRouter.patch("/api/recipes/:id/feedback/:fid", (req: Request, res: Respon
   const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const fid = Array.isArray(req.params.fid) ? req.params.fid[0] : req.params.fid;
   const body = (req.body ?? {}) as { resultingRecipeId?: string };
-  if (!body.resultingRecipeId || typeof body.resultingRecipeId !== "string") {
+  const resultingRecipeId = normalizeRecipeSaveRequestId(body.resultingRecipeId);
+  if (!resultingRecipeId || Object.keys(req.body ?? {}).length !== 1) {
     res.status(400).json({ ok: false, error: "resultingRecipeId 不能为空" });
     return;
   }
@@ -421,7 +458,16 @@ recipesRouter.patch("/api/recipes/:id/feedback/:fid", (req: Request, res: Respon
     res.status(404).json({ ok: false, error: `配方 ${id} 的反馈 ${fid} 不存在` });
     return;
   }
-  fb.resultingRecipeId = body.resultingRecipeId;
+  const resultingRecipe = list.find((recipe) => recipe.id === resultingRecipeId);
+  if (!resultingRecipe) {
+    res.status(404).json({ ok: false, error: "结果配方不存在" });
+    return;
+  }
+  if (resultingRecipe.parentId !== id || resultingRecipe.sourceFeedbackId !== fid) {
+    res.status(400).json({ ok: false, error: "结果配方与当前反馈的版本链不匹配" });
+    return;
+  }
+  fb.resultingRecipeId = resultingRecipeId;
   saveAll(list);
   res.json({ ok: true });
 });

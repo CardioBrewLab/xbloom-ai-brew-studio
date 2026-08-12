@@ -4,6 +4,7 @@ param(
     [ValidatePattern('^$|^https://')][string]$LlmBaseUrl = '',
     [ValidateLength(0,200)][string]$LlmModel = '',
     [string]$WorkerName = 'xbloom-ai-brew-studio',
+    [ValidateSet('free','scale')][string]$XhsBrowserProfile = 'free',
     [switch]$SkipDeploy,
     [switch]$ConfigureSharedGuestModel,
     [switch]$RotateEdgeProxySecret
@@ -40,6 +41,19 @@ function Set-WorkerSecret([string]$Name, [string]$Value) {
     if ($LASTEXITCODE -ne 0) { throw "Saving $Name failed" }
 }
 
+function Set-XhsBrowserProfile([string]$ConfigText) {
+    $profileValues = if ($XhsBrowserProfile -eq 'scale') {
+        @{
+            Profile = 'scale'; Qr = '2500'; Search = '20000'; OwnerQr = '8'; OwnerSearch = '100'
+        }
+    } else {
+        @{
+            Profile = 'free'; Qr = '3'; Search = '20'; OwnerQr = '3'; OwnerSearch = '10'
+        }
+    }
+    return $ConfigText.Replace('"XHS_BROWSER_PROFILE": "free"', '"XHS_BROWSER_PROFILE": "' + $profileValues.Profile + '"').Replace('"XHS_BROWSER_QR_DAILY_LIMIT": "3"', '"XHS_BROWSER_QR_DAILY_LIMIT": "' + $profileValues.Qr + '"').Replace('"XHS_BROWSER_SEARCH_DAILY_LIMIT": "20"', '"XHS_BROWSER_SEARCH_DAILY_LIMIT": "' + $profileValues.Search + '"').Replace('"XHS_BROWSER_QR_OWNER_DAILY_LIMIT": "3"', '"XHS_BROWSER_QR_OWNER_DAILY_LIMIT": "' + $profileValues.OwnerQr + '"').Replace('"XHS_BROWSER_SEARCH_OWNER_DAILY_LIMIT": "10"', '"XHS_BROWSER_SEARCH_OWNER_DAILY_LIMIT": "' + $profileValues.OwnerSearch + '"')
+}
+
 Push-Location $Root
 try {
     npm ci
@@ -57,6 +71,7 @@ try {
     if ($SkipDeploy) {
         $configText = (Get-Content -Raw -LiteralPath $Template -Encoding utf8)
         $configText = $configText.Replace('xbloom-ai-brew-studio', $WorkerName).Replace('https://YOUR_OPENAI_COMPATIBLE_HOST/v1', $LlmBaseUrl.TrimEnd('/')).Replace('YOUR_MODEL_ID', $LlmModel)
+        $configText = Set-XhsBrowserProfile $configText
         [IO.File]::WriteAllText($Config, $configText, [Text.UTF8Encoding]::new($false))
         Invoke-Npx @('wrangler','deploy','--dry-run','--config',$Config)
         Write-Host 'Cloudflare preflight passed; no remote resources were changed.' -ForegroundColor Green
@@ -79,6 +94,7 @@ try {
 
     $configText = (Get-Content -Raw -LiteralPath $Template -Encoding utf8)
     $configText = $configText.Replace('xbloom-ai-brew-studio', $WorkerName).Replace('00000000-0000-0000-0000-000000000000', $databaseId).Replace('https://YOUR_OPENAI_COMPATIBLE_HOST/v1', $LlmBaseUrl.TrimEnd('/')).Replace('YOUR_MODEL_ID', $LlmModel)
+    $configText = Set-XhsBrowserProfile $configText
     [IO.File]::WriteAllText($Config, $configText, [Text.UTF8Encoding]::new($false))
 
     Invoke-Npx @('wrangler','d1','migrations','apply',$DatabaseName,'--remote','--config',$Config)

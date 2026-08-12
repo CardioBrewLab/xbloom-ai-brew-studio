@@ -9,6 +9,12 @@ import {
 } from "./recipe.ts";
 import { generateModelText } from "../../shared/src/model-provider.ts";
 import {
+  BEAN_EXTRACTION_SYSTEM_PROMPT,
+  beanExtractionUserPrompt,
+  parseBeanExtractionOutput,
+  type BeanExtractionResult,
+} from "../../shared/src/bean-extraction.ts";
+import {
   BeanInputSchema,
   BeanPatchSchema,
   FeedbackInputSchema,
@@ -34,8 +40,12 @@ export interface Env extends ModelSettingsEnv {
   APP_DATA_ENCRYPTION_KEY?: string;
   EDGE_PROXY_SECRET?: string;
   BROWSER?: import("@cloudflare/puppeteer").BrowserWorker;
+  XHS_BROWSER_PROFILE?: string;
   XHS_BROWSER_QR_DAILY_LIMIT?: string;
   XHS_BROWSER_SEARCH_DAILY_LIMIT?: string;
+  XHS_BROWSER_QR_OWNER_DAILY_LIMIT?: string;
+  XHS_BROWSER_SEARCH_OWNER_DAILY_LIMIT?: string;
+  XHS_RESEARCH_CACHE_TTL_SECONDS?: string;
 }
 
 interface ItemRow {
@@ -408,6 +418,13 @@ function isTransientModelError(error: unknown): boolean {
   );
 }
 
+function isRecoverableRecipeFormatError(error: unknown): boolean {
+  const message = String((error as Error)?.message ?? error);
+  return /模型响应中没有配方 JSON|配方不是对象|配方缺少注水段|response missing content/i.test(
+    message,
+  );
+}
+
 export function publicHostedFailureReason(error: unknown): string {
   const message = String((error as Error)?.message ?? error).toLowerCase();
   const status = Number(message.match(/http\s+(\d{3})/)?.[1] ?? 0);
@@ -586,8 +603,61 @@ async function callModel(
       } catch (error) {
         lastError = error;
         if (signal.aborted) throw error;
-        if (attempt < 1 && isTransientModelError(error)) {
+        if (
+          attempt < 1 &&
+          (isTransientModelError(error) || isRecoverableRecipeFormatError(error))
+        ) {
           await wait(350, signal);
+          continue;
+        }
+        break;
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function parseHostedBeanInfo(
+  env: Env,
+  user: AuthUser | null,
+  sourceText: string,
+  signal: AbortSignal,
+): Promise<BeanExtractionResult> {
+  const connection = await modelConnectionForUser(env, user);
+  if (!connection) throw new Error("请先登录并完成模型连接配置");
+  const models = [connection.model, connection.fallbackModel, connection.thirdModel].filter(
+    (model, index, all) => Boolean(model) && all.indexOf(model) === index,
+  );
+  let lastError: unknown = new Error("模型响应格式不完整");
+  for (const model of models) {
+    for (let attempt = 0; attempt <= 1; attempt += 1) {
+      try {
+        const content = await generateModelText(
+          {
+            ...connection,
+            model,
+            apiKey:
+              model !== connection.model && connection.fallbackApiKey
+                ? connection.fallbackApiKey
+                : connection.apiKey,
+          },
+          [
+            { role: "system", content: BEAN_EXTRACTION_SYSTEM_PROMPT },
+            { role: "user", content: beanExtractionUserPrompt(sourceText) },
+          ],
+          { signal, timeoutMs: 45_000, temperature: 0.1, maxTokens: 900 },
+        );
+        const extraction = parseBeanExtractionOutput(content, sourceText);
+        if (!extraction) throw new Error("bean extraction response format incomplete");
+        return extraction;
+      } catch (error) {
+        lastError = error;
+        if (signal.aborted) throw error;
+        const malformed = /bean extraction response format incomplete/i.test(
+          String((error as Error)?.message ?? error),
+        );
+        if (attempt < 1 && (malformed || isTransientModelError(error))) {
+          await wait(250, signal);
           continue;
         }
         break;
@@ -1377,25 +1447,21 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
   }
   if (request.method === "POST" && path === "/api/beans/parse") {
     const body = await requestBody(request);
-    const text = typeof body.text === "string" ? body.text.slice(0, 8_000) : "";
-    return json({
-      ok: true,
-      parsed: {
-        name:
-          text
-            .split(/[\n，,]/)[0]
-            ?.trim()
-            .slice(0, 80) || null,
-        roaster: null,
-        origin: null,
-        farm: null,
-        process: null,
-        varietal: null,
-        roastLevel: null,
-        tastingNotes: [],
-        roastDate: null,
-      },
-    });
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (!text || text.length > 8_000)
+      return json({ ok: false, error: "请粘贴 1-8000 字的咖啡豆信息" }, 400);
+    try {
+      const extraction = await parseHostedBeanInfo(env, identity.user, text, request.signal);
+      return json({ ok: true, ...extraction });
+    } catch (error) {
+      const raw = String((error as Error)?.message ?? error);
+      const reason = raw.startsWith("请先登录")
+        ? raw
+        : publicHostedFailureReason(error) === "模型接口本次未返回可用配方"
+          ? "模型接口本次未返回可用豆信息"
+          : publicHostedFailureReason(error);
+      return json({ ok: false, error: `豆信息解析未完成：${reason}` });
+    }
   }
   const beanMatch = path.match(/^\/api\/beans\/([0-9a-f-]+)$/i);
   if (beanMatch && request.method === "DELETE") {

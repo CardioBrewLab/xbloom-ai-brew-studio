@@ -340,6 +340,8 @@ export default function BeanForm({
       setParsed(res.parsed);
       setDraft({});
       setExtraRows(new Set());
+      // 混排文本中的时间、注水量与研磨参数属于参考冲法，不进入豆名或豆档案字段。
+      setRoasterReference(res.roasterReference?.trim() ?? "");
       // 解析成功即自动应用（任务 #123）：无需手动点「应用到表单」
       if (mapParsedToBeanFields(res.parsed)) {
         setManualBeans(mapParsedToBeanFields(res.parsed)!);

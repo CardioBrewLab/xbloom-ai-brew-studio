@@ -167,9 +167,32 @@ async function migrateAnonymousItems(
     ).bind(target, anonymousOwner),
     env.DB.prepare("DELETE FROM user_items WHERE owner=?").bind(anonymousOwner),
     env.DB.prepare(
-      `INSERT OR IGNORE INTO xhs_browser_sessions(owner,encrypted_cookies,nickname,qr_session_id,qr_expires_at,updated_at)
-       SELECT ?,encrypted_cookies,nickname,qr_session_id,qr_expires_at,updated_at
-         FROM xhs_browser_sessions WHERE owner=?`,
+      `INSERT INTO xhs_browser_sessions(
+         owner,encrypted_cookies,nickname,qr_session_id,qr_expires_at,updated_at,encrypted_qr_payload
+       )
+       SELECT ?,encrypted_cookies,nickname,qr_session_id,qr_expires_at,updated_at,encrypted_qr_payload
+         FROM xhs_browser_sessions WHERE owner=?
+       ON CONFLICT(owner) DO UPDATE SET
+         encrypted_cookies=excluded.encrypted_cookies,
+         nickname=excluded.nickname,
+         qr_session_id=excluded.qr_session_id,
+         qr_expires_at=excluded.qr_expires_at,
+         updated_at=excluded.updated_at,
+         encrypted_qr_payload=excluded.encrypted_qr_payload
+       WHERE (
+         excluded.encrypted_cookies<>'' AND (
+           xhs_browser_sessions.encrypted_cookies=''
+           OR excluded.updated_at>xhs_browser_sessions.updated_at
+         )
+       ) OR (
+         xhs_browser_sessions.encrypted_cookies=''
+         AND excluded.encrypted_cookies=''
+         AND excluded.qr_session_id<>''
+         AND (
+           xhs_browser_sessions.qr_session_id=''
+           OR excluded.updated_at>xhs_browser_sessions.updated_at
+         )
+       )`,
     ).bind(target, anonymousOwner),
     env.DB.prepare("DELETE FROM xhs_browser_sessions WHERE owner=?").bind(anonymousOwner),
   ]);

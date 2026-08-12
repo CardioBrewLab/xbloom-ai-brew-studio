@@ -884,6 +884,8 @@ export const api = {
 export interface ParseBeanInfoResult {
   ok: boolean;
   parsed?: ParsedBeanInfo;
+  inputKind?: "bean" | "brew-guide" | "mixed";
+  roasterReference?: string;
   error?: string;
 }
 

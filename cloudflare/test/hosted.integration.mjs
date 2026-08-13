@@ -126,13 +126,18 @@ async function waitUntilReady() {
   throw new Error(`本地 Worker 启动超时\n${workerOutput.slice(-4_000)}`);
 }
 
-function stopWorker() {
+async function stopWorker() {
   if (!worker || worker.exitCode !== null) return;
+  const exited = new Promise((resolve) => worker.once("exit", resolve));
   if (process.platform === "win32") {
     spawnSync("taskkill", ["/PID", String(worker.pid), "/T", "/F"], { stdio: "ignore" });
   } else {
     worker.kill("SIGTERM");
   }
+  // taskkill returns before every workerd file handle is released on some
+  // Windows runners. Wait for the child first; rm's retry window below covers
+  // the short interval between process exit and filesystem unlock.
+  await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 10_000))]);
 }
 
 const validRecipe = {
@@ -725,6 +730,6 @@ try {
   console.error(workerOutput.slice(-8_000));
   throw error;
 } finally {
-  stopWorker();
-  await rm(persistTo, { recursive: true, force: true });
+  await stopWorker();
+  await rm(persistTo, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
 }

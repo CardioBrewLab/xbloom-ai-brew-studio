@@ -10,7 +10,9 @@ import { detectModelProvider, type ModelProvider } from "../../shared/dist/model
 const here = path.dirname(fileURLToPath(import.meta.url));
 const envPath = path.resolve(here, "../../.env");
 
-dotenv.config({ path: envPath });
+// dotenv 17 logs a promotional load message by default; startup output is an
+// operational surface here, so keep it deterministic without hiding errors.
+dotenv.config({ path: envPath, quiet: true });
 
 function num(value: string | undefined, fallback: number): number {
   const n = Number(value);

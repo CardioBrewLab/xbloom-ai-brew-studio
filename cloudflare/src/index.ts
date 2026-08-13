@@ -1319,7 +1319,7 @@ async function routeApi(request: Request, env: Env, identity: RequestIdentity): 
   if (request.method === "GET" && path === "/api/status")
     return json({
       ok: true,
-      version: "hosted-0.2.1",
+      version: "hosted-0.2.2",
       deployment: "cloudflare",
       capabilities: {
         generate: true,

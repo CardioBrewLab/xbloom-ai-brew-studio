@@ -1,6 +1,6 @@
 # xBloom AI Brew Studio
 
-> Version 0.2.1 · Windows 本地版 + 多用户 Hosted 云端版 · BYOK
+> Version 0.2.2 · Windows 本地版 + 多用户 Hosted 云端版 · BYOK
 
 xBloom AI Brew Studio 会把咖啡目标、豆子、风味偏好和调研信息整理成可执行的 xBloom 配方。项目提供两种使用方式：
 
@@ -8,6 +8,16 @@ xBloom AI Brew Studio 会把咖啡目标、豆子、风味偏好和调研信息�
 - **Windows 本地版**：适合保存本地文件、使用本地调研工具、运行可选的小红书助手和可选的 Bluetooth 设备实验室。
 
 新用户优先使用 Hosted 云端版即可完成主要流程；需要本地数据、本地工具或 BLE 设备时，再使用 Windows 本地版。
+
+## 支持项目
+
+这个项目免费开源，也由个人持续维护。如果你正好需要模型 API，可以通过下面的项目邀请链接注册；通过它注册可能为项目带来返利，具体服务和价格以平台页面为准。
+
+- [模型 API 邀请注册链接](https://llm.mathmodel.tech/sign-up?aff=NmPu)
+
+如果它刚好帮你省了点抄参数的时间，也可以扫码请我喝杯咖啡。支持完全自愿，与项目功能和服务优先级无关。
+
+<img src="web/public/support/wechat-support-qr.jpg" alt="微信支持项目收款二维码" width="260">
 
 > EdgeOne 的系统项目域名不是长期公开网址。在中国大陆或全球（含中国大陆）区域，它必须使用控制台生成、有效期约 3 小时的预览链接；令牌过期后，直接访问系统域名会返回 401。面向用户发布时请绑定正式自定义域名，并用 `npm run check:hosted-url -- https://YOUR_DOMAIN/` 验证匿名首页和 `/api/status`。
 

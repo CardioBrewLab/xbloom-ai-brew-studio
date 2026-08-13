@@ -241,7 +241,7 @@ try {
   assert.equal(status.response.status, 200);
   assert.equal(status.response.headers.get("x-frame-options"), "DENY");
   assert.equal(status.response.headers.get("x-content-type-options"), "nosniff");
-  assert.equal(status.payload.version, "hosted-0.2.1");
+  assert.equal(status.payload.version, "hosted-0.2.2");
   assert.equal(status.payload.capabilities.auth, true);
 
   for (let attempt = 0; attempt < 22; attempt += 1) {

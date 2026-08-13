@@ -1,11 +1,11 @@
 {
   "name": "xbloom-ai-brew-studio",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "xBloom AI 冲煮工作台 —— LLM 配方生成 / 云端同步 / BLE 实验",
   "license": "MIT",
   "engines": {
-    "node": ">=22.11.0"
+    "node": ">=22.12.0"
   },
   "workspaces": [
     "shared",

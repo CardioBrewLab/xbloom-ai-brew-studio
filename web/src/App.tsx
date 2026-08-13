@@ -87,6 +87,7 @@ import {
 // preserving every workflow once the user opens it.
 const ApiSettingsModal = lazy(() => import("./components/ApiSettingsModal.js"));
 const AccountModal = lazy(() => import("./components/AccountModal.js"));
+const SupportProjectModal = lazy(() => import("./components/SupportProjectModal.js"));
 const BrewGuide = lazy(() => import("./components/BrewGuide.js"));
 const CurveChart = lazy(() => import("./components/CurveChart.js"));
 const FeedbackModal = lazy(() => import("./components/FeedbackModal.js"));
@@ -1602,6 +1603,7 @@ export default function App() {
 
   // ---- 本机模型接口设置 ----
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [supportOpen, setSupportOpen] = useState(false);
 
   // ---- 中栏曲线模型 ----
   const curve = useMemo(() => (recipe ? buildCurve(recipe) : null), [recipe]);
@@ -1631,6 +1633,7 @@ export default function App() {
         xhsExpired={xhsExpired}
         onClearXhsExpired={clearXhsExpired}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSupport={() => setSupportOpen(true)}
         hosted={config?.deployment === "cloudflare"}
         account={account}
         onOpenAccount={() => setAccountOpen(true)}
@@ -2020,6 +2023,11 @@ export default function App() {
               if (next.authenticated && !nextConfig?.modelConfigured) setSettingsOpen(true);
             }}
           />
+        </Suspense>
+      )}
+      {supportOpen && (
+        <Suspense fallback={<ModalLoading label="正在打开支持项目" />}>
+          <SupportProjectModal open onClose={() => setSupportOpen(false)} />
         </Suspense>
       )}
       {feedbackEntry !== null && (

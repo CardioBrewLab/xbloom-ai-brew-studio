@@ -1,6 +1,6 @@
 {
   "name": "@xbloom/web",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "description": "xBloom AI 冲煮工作台前端（Vite + React + Tailwind）",

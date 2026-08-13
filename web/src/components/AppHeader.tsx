@@ -22,6 +22,7 @@ export interface AppHeaderProps {
   xhsExpired: boolean;
   onClearXhsExpired: () => void;
   onOpenSettings: () => void;
+  onOpenSupport: () => void;
   hosted: boolean;
   account: AuthSession | null;
   onOpenAccount: () => void;
@@ -42,6 +43,7 @@ export default function AppHeader({
   xhsExpired,
   onClearXhsExpired,
   onOpenSettings,
+  onOpenSupport,
   hosted,
   account,
   onOpenAccount,
@@ -107,12 +109,25 @@ export default function AppHeader({
               </button>
             </div>
           </div>
-          <div className="flex items-center justify-between border-t border-[var(--line)] px-3 py-1.5">
+          <div className="flex items-center justify-between gap-2 border-t border-[var(--line)] px-3 py-1.5">
             <span className="flex items-center gap-1.5 text-[10px] text-[var(--tx-3)]">
               <StatusDot tone={backendUp ? "ok" : "warn"} pulse={backendUp} />
               {cloud?.loggedIn ? "xBloom App 已登录" : "生成后上传到手机 App"}
             </span>
-            <InterfaceModeControl value={interfaceMode} onChange={onInterfaceModeChange} compact />
+            <div className="flex shrink-0 items-center gap-1.5">
+              <button
+                type="button"
+                onClick={onOpenSupport}
+                className="flex h-11 items-center gap-1.5 rounded-lg border border-[var(--line)] px-2.5 text-[11px] font-medium text-[var(--tx-2)]"
+              >
+                <IconHeart /> 支持
+              </button>
+              <InterfaceModeControl
+                value={interfaceMode}
+                onChange={onInterfaceModeChange}
+                compact
+              />
+            </div>
           </div>
         </header>
         <nav
@@ -243,6 +258,15 @@ export default function AppHeader({
             <XhsAccount expiredAlert={xhsExpired} onClearExpired={onClearXhsExpired} />
           </span>
           <InterfaceModeControl value={interfaceMode} onChange={onInterfaceModeChange} />
+          <button
+            type="button"
+            onClick={onOpenSupport}
+            aria-label="支持项目"
+            title="支持项目"
+            className="flex h-8 items-center gap-1.5 rounded-lg border border-[var(--line)] px-2.5 text-xs font-medium text-[var(--tx-2)] transition-colors hover:border-[var(--line-strong)] hover:text-[var(--tx-1)]"
+          >
+            <IconHeart /> <span className="hidden xl:inline">支持项目</span>
+          </button>
           {hosted && (
             <button
               type="button"
@@ -366,6 +390,26 @@ function IconAccount() {
     >
       <circle cx="12" cy="8" r="3" />
       <path d="M5 20c.7-4 3-6 7-6s6.3 2 7 6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function IconHeart() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      aria-hidden
+    >
+      <path
+        d="M20.8 5.8a5.4 5.4 0 0 0-7.6 0L12 7l-1.2-1.2a5.4 5.4 0 0 0-7.6 7.6L12 22l8.8-8.6a5.4 5.4 0 0 0 0-7.6Z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }

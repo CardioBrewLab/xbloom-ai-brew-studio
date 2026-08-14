@@ -348,6 +348,35 @@ describe("多候选生成路由（任务 #106）", () => {
     assert.equal(requests.length, 5, "3 次 429 + 2 次成功 = 5 次请求");
   });
 
+  it("MAX 部分候选 429：保留成功方案并串行补齐失败槽位", async () => {
+    config.generateCandidates = 3;
+    const requests = await useMockLlm([
+      { content: fence(GOOD_RECIPE) },
+      { status: 429 },
+      { status: 429 },
+      { content: fence(MID_RECIPE) },
+      { content: fence(BAD_RECIPE) },
+    ]);
+
+    const text = await postGenerate({ description: "冲一杯平衡的手冲咖啡" });
+    const events = parseEvents(text);
+    const starts = events.filter((event) => event.type === "candidates" && event.stage === "start");
+    assert.deepEqual(
+      starts.map((event) => event.n),
+      [3, 2],
+      "首轮三案后只串行补发两个失败槽位",
+    );
+    const picked = events.find((event) => event.type === "candidates" && event.stage === "picked")!;
+    const results = picked.results as Array<{ status: string; failReason?: string }>;
+    assert.equal(results.length, 3);
+    assert.ok(
+      results.every((result) => result.status === "ok"),
+      "补发后应有三份有效候选",
+    );
+    assert.equal(requests.length, 5, "3 个首轮请求 + 2 个失败槽位串行补发");
+    assert.ok(!events.some((event) => event.type === "error"), "部分限流不进入整轮错误路径");
+  });
+
   it("MAX 单候选 fetch failed：只补发该候选并最终保留 3 份完整结果", async () => {
     config.generateCandidates = 3;
     const requests = await useMockLlm([
@@ -559,6 +588,7 @@ describe("多候选生成路由（任务 #106）", () => {
       { content: fence(GOOD_RECIPE) },
       { content: "抱歉，我无法输出 JSON" }, // 一个候选结构失败
       { content: fence(MID_RECIPE) },
+      { content: "仍然没有可解析的 JSON" }, // 串行补发仍为结构失败，保留失败明细
     ]);
 
     const text = await postGenerate({ description: "冲一杯平衡的手冲咖啡" });
@@ -566,7 +596,7 @@ describe("多候选生成路由（任务 #106）", () => {
 
     // progress：每条携带 result（index + status），失败者附 failReason
     const progress = events.filter((e) => e.type === "candidates" && e.stage === "progress");
-    assert.equal(progress.length, 3);
+    assert.equal(progress.length, 4, "3 个首轮结果 + 1 个失败槽位补发结果");
     const results = progress.map(
       (p) => p.result as { index: number; status: string; failReason?: string },
     );
@@ -574,13 +604,16 @@ describe("多候选生成路由（任务 #106）", () => {
       results.every((r) => r && typeof r.index === "number"),
       "progress 必须携带逐候选 result",
     );
-    const failedProgress = results.filter((r) => r.status === "failed");
-    assert.equal(failedProgress.length, 1, "恰好一个候选结构失败");
+    const latestByIndex = new Map(results.map((result) => [result.index, result]));
+    const failedProgress = [...latestByIndex.values()].filter(
+      (result) => result.status === "failed",
+    );
+    assert.equal(failedProgress.length, 1, "补发后仍恰好一个候选结构失败");
     assert.ok(
       String(failedProgress[0].failReason).startsWith("结构失败："),
       "失败原因以「结构失败：」开头",
     );
-    assert.equal(results.filter((r) => r.status === "ok").length, 2);
+    assert.equal([...latestByIndex.values()].filter((result) => result.status === "ok").length, 2);
 
     // picked.results：全量 3 条，失败者带原因，成功者带 score/deductions
     const picked = events.find((e) => e.type === "candidates" && e.stage === "picked")!;

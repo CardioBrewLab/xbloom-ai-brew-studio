@@ -61,6 +61,11 @@ describe("前端边界修复", () => {
     assert.match(ui, /document\.body\.style\.overflow = "hidden"/);
     assert.match(ui, /previouslyFocused\.focus\(\)/);
     assert.match(stream, /aria-live="polite"/);
+    assert.match(
+      stream,
+      /candidateDisplayCount\(candState\) > 1/,
+      "单槽补发期间仍应保留完整候选卡",
+    );
     assert.match(stream, /role="alert"/);
     assert.match(stream, /requestAnimationFrame/);
     assert.match(stream, /scrollHeight - el\.scrollTop - el\.clientHeight <= 48/);

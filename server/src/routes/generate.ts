@@ -110,6 +110,8 @@ const CANDIDATE_DIVERSITY_RETRIES = 2;
 const CANDIDATE_MODEL_TIMEOUT_MS = 60_000;
 const CANDIDATE_CHAIN_BUDGET_MS = 90_000;
 const CANDIDATE_DIVERSITY_BUDGET_MS = 35_000;
+const CANDIDATE_REFILL_BUDGET_MS = 60_000;
+const CANDIDATE_CONCURRENCY_BACKOFF_MS = 650;
 
 const CANDIDATE_DIRECTIONS = [
   "稳健基线：优先均衡、甜感与高复现性，参数变化克制。",
@@ -226,7 +228,7 @@ function waitForCandidateRetry(ms: number, signal: AbortSignal): Promise<void> {
 
 /**
  * MAX 的每个候选在连接瞬断时独立补发一次完整模型链。
- * 限流仍交给批次级 3→2→1 策略，避免并行重试进一步放大网关压力。
+ * 限流留给首轮后的批次恢复：部分成功时串行补槽，全失败时走 3→2→1。
  */
 async function generateCandidateContent(
   messages: ChatMessage[],
@@ -1254,6 +1256,7 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
         let structuralRetried = false;
         outer: while (true) {
           sendEvent(res, { type: "candidates", stage: "start", n, round });
+          let candidateEventRound = round;
           interface CandidateOutcome {
             index: number;
             /** 成功时的原始非流式正文（任务 #113：获胜后补发 content 事件用） */
@@ -1321,6 +1324,85 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
               })(),
             ),
           );
+
+          // A gateway with a one-request concurrency window can accept the first MAX
+          // candidate and reject the other two. The old all-failed 3→2→1 branch never
+          // ran in that partial-success shape, so the UI received one recipe plus red
+          // failure rows. Keep the fast parallel first pass, then refill only retryable
+          // failed slots serially while preserving the successful work.
+          const successfulBeforeRefill = outcomes.filter(
+            (outcome): outcome is CandidateOutcome & { parsed: ParsedRecipe } => !!outcome.parsed,
+          );
+          const refillable = outcomes.filter((outcome) => {
+            if (!outcome.failure) return false;
+            return (
+              outcome.failure.kind === "structural" ||
+              isConcurrencyError(outcome.failure.err) ||
+              isTransientTransportError(outcome.failure.err)
+            );
+          });
+          if (successfulBeforeRefill.length > 0 && refillable.length > 0) {
+            candidateEventRound = round + 1;
+            sendEvent(res, {
+              type: "candidates",
+              stage: "start",
+              n: refillable.length,
+              round: candidateEventRound,
+            });
+            const refillSignal = AbortSignal.any([
+              aborter.signal,
+              AbortSignal.timeout(CANDIDATE_REFILL_BUDGET_MS),
+            ]);
+            const acceptedRecipes = successfulBeforeRefill.map((outcome) => outcome.parsed.recipe);
+            let refillDone = 0;
+            for (const failed of refillable.sort((left, right) => left.index - right.index)) {
+              let replacement: CandidateOutcome;
+              try {
+                if (failed.failure?.kind === "request" && isConcurrencyError(failed.failure.err)) {
+                  await waitForCandidateRetry(CANDIDATE_CONCURRENCY_BACKOFF_MS, refillSignal);
+                }
+                const content = await generateCandidateContent(
+                  candidateMessages(messages, failed.index, n, acceptedRecipes),
+                  body.model,
+                  refillSignal,
+                  5_042 + round * 100 + failed.index,
+                );
+                try {
+                  const parsed = toClampedRecipe(content);
+                  replacement = {
+                    index: failed.index,
+                    content,
+                    parsed,
+                    completionOrder: completionSeq++,
+                  };
+                  acceptedRecipes.push(parsed.recipe);
+                } catch (err) {
+                  replacement = {
+                    index: failed.index,
+                    completionOrder: completionSeq++,
+                    failure: { kind: "structural", content, errors: zodIssues(err) },
+                  };
+                }
+              } catch (err) {
+                if (aborter.signal.aborted) throw err;
+                replacement = {
+                  index: failed.index,
+                  completionOrder: completionSeq++,
+                  failure: { kind: "request", err },
+                };
+              }
+              outcomes[failed.index] = replacement;
+              refillDone += 1;
+              sendEvent(res, {
+                type: "candidates",
+                stage: "progress",
+                round: candidateEventRound,
+                done: refillDone,
+                total: refillable.length,
+                result: candidateProgressResult(replacement),
+              });
+            }
+          }
 
           // 相同提示词 + 固定 seed 会让部分 OpenAI 兼容网关重放同一配方。
           // 首轮仍并行；仅对核心参数指纹重复的槽位做定向补发，保留 MAX 的速度与三案真实性。
@@ -1527,7 +1609,7 @@ generateRouter.post("/api/generate", async (req: Request, res: Response) => {
           candidatePickedEvent = {
             type: "candidates",
             stage: "picked",
-            round,
+            round: candidateEventRound,
             winner: winnerIndex,
             scores: ranked.map((r) => ({
               index: r.index,

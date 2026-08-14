@@ -95,18 +95,29 @@ export const CANDIDATES_IDLE: CandidatesState = {
   results: [],
 };
 
+/** 当前卡片应展示的完整候选槽位数；补发轮的 total 仅代表本轮工作量。 */
+export function candidateDisplayCount(state: CandidatesState): number {
+  return Math.max(
+    state.n,
+    state.total,
+    state.results.reduce((max, result) => Math.max(max, result.index + 1), 0),
+  );
+}
+
 /** candidates / recipe(candidateScore) 事件 → 新状态；无关事件原样返回 */
 export function reduceCandidatesEvent(state: CandidatesState, ev: GenerateEvent): CandidatesState {
   if (ev.type === "candidates") {
     const w = ev;
     if (w.stage === "start") {
+      const followup = (w.round ?? 0) > 0 && state.phase !== "idle";
       return {
         phase: "running",
         n: w.n,
         done: 0,
         total: w.n,
-        scores: [],
-        results: [],
+        scores: followup ? state.scores : [],
+        results: followup ? state.results : [],
+        ...(followup && state.winner !== undefined ? { winner: state.winner } : {}),
         ...(w.round ? { round: w.round } : {}),
       };
     }
@@ -114,11 +125,19 @@ export function reduceCandidatesEvent(state: CandidatesState, ev: GenerateEvent)
       const results = w.result
         ? [...state.results.filter((r) => r.index !== w.result!.index), w.result]
         : state.results;
-      return { ...state, done: w.done, total: w.total, results };
+      return {
+        ...state,
+        done: w.done,
+        total: w.total,
+        results,
+        ...(w.round ? { round: w.round } : {}),
+      };
     }
+    const resultCount = w.results?.length ?? 0;
     return {
       ...state,
       phase: "picked",
+      n: resultCount > 0 ? resultCount : state.n,
       winner: w.winner,
       scores: w.scores,
       results: w.results && w.results.length > 0 ? w.results : state.results,

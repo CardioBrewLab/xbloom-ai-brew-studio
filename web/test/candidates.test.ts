@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   CANDIDATES_IDLE,
+  candidateDisplayCount,
   candidateDimensionLines,
   candidateHasDistinctScoreTie,
   candidatePickHeadline,
@@ -80,8 +81,49 @@ describe("reduceCandidatesEvent（任务 #106）", () => {
       ],
       round: 1,
     } as unknown as GenerateEvent);
+    assert.equal(picked.n, 3);
     assert.equal(picked.total, 3);
     assert.equal(picked.results.length, 3);
+  });
+
+  it("补发 start 保留首轮候选，成功进度按原 index 覆盖失败槽位", () => {
+    let state = reduceCandidatesEvent(CANDIDATES_IDLE, {
+      type: "candidates",
+      stage: "start",
+      n: 3,
+    });
+    for (const result of [
+      { index: 0, status: "ok" as const },
+      { index: 1, status: "failed" as const, failReason: "网关限流/并发失败" },
+      { index: 2, status: "failed" as const, failReason: "网关限流/并发失败" },
+    ]) {
+      state = reduceCandidatesEvent(state, {
+        type: "candidates",
+        stage: "progress",
+        done: result.index + 1,
+        total: 3,
+        result,
+      } as unknown as GenerateEvent);
+    }
+    state = reduceCandidatesEvent(state, {
+      type: "candidates",
+      stage: "start",
+      n: 2,
+      round: 1,
+    });
+    assert.equal(state.results.length, 3, "进入补发阶段仍显示首轮三项结果");
+    assert.equal(candidateDisplayCount(state), 3, "补发两项时卡片仍保留三个候选槽位");
+    state = reduceCandidatesEvent(state, {
+      type: "candidates",
+      stage: "progress",
+      done: 1,
+      total: 2,
+      round: 1,
+      result: { index: 1, status: "ok" },
+    } as unknown as GenerateEvent);
+    assert.equal(state.results.find((result) => result.index === 1)?.status, "ok");
+    assert.equal(state.results.length, 3);
+    assert.equal(candidatesProgressText(state), "第 2 轮正在补发 2 份方案…(1/2)");
   });
 
   it("recipe.candidateScore → 记录优选明细 detail", () => {

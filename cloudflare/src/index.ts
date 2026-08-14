@@ -461,6 +461,8 @@ const HOSTED_MAX_CANDIDATE_BUDGET_MS = 75_000;
 const HOSTED_SINGLE_CANDIDATE_BUDGET_MS = 90_000;
 const HOSTED_MAX_SCORE_TARGET = 90;
 const HOSTED_DIVERSITY_RETRIES = 1;
+const HOSTED_MAX_REFILL_BUDGET_MS = 34_000;
+const HOSTED_CONCURRENCY_BACKOFF_MS = 650;
 
 function isTransientModelError(error: unknown): boolean {
   const message = String((error as Error)?.message ?? error).toLowerCase();
@@ -474,10 +476,15 @@ function isTransientModelError(error: unknown): boolean {
 }
 
 function isRecoverableRecipeFormatError(error: unknown): boolean {
+  if (error instanceof SyntaxError) return true;
   const message = String((error as Error)?.message ?? error);
   return /模型响应中没有配方 JSON|配方不是对象|配方缺少注水段|response missing content/i.test(
     message,
   );
+}
+
+export function isHostedCandidateRetryable(error: unknown): boolean {
+  return isTransientModelError(error) || isRecoverableRecipeFormatError(error);
 }
 
 export function publicHostedFailureReason(error: unknown): string {
@@ -660,10 +667,7 @@ async function callModel(
       } catch (error) {
         lastError = error;
         if (signal.aborted) throw error;
-        if (
-          attempt < 1 &&
-          (isTransientModelError(error) || isRecoverableRecipeFormatError(error))
-        ) {
+        if (attempt < 1 && isHostedCandidateRetryable(error)) {
           await wait(350, signal);
           continue;
         }
@@ -730,6 +734,55 @@ export interface HostedCandidateOutcome {
   clamps?: string[];
   model?: string;
   error?: string;
+  /** Internal recovery hint; never included in the public SSE result. */
+  retryable?: boolean;
+}
+
+type HostedGeneratedCandidate = {
+  recipe: HostedRecipe;
+  clamps: string[];
+  model: string;
+};
+
+/**
+ * Preserve successful MAX candidates and refill only retryable failed slots.
+ * The for-of loop is intentional: constrained OpenAI-compatible gateways often
+ * allow one active request and reject the other parallel candidates with 429.
+ */
+export async function refillHostedCandidateFailures(
+  outcomes: HostedCandidateOutcome[],
+  generate: (index: number, accepted: HostedRecipe[]) => Promise<HostedGeneratedCandidate>,
+  options: {
+    clientSignal?: AbortSignal;
+    onProgress?: (outcome: HostedCandidateOutcome, done: number, total: number) => void;
+  } = {},
+): Promise<HostedCandidateOutcome[]> {
+  const updated = outcomes.map((outcome) => ({ ...outcome }));
+  const accepted = updated.flatMap((outcome) => (outcome.recipe ? [outcome.recipe] : []));
+  const failed = updated
+    .filter((outcome) => !outcome.recipe && outcome.retryable)
+    .sort((left, right) => left.index - right.index);
+  let done = 0;
+  for (const outcome of failed) {
+    let replacement: HostedCandidateOutcome;
+    try {
+      const generated = await generate(outcome.index, accepted);
+      replacement = { index: outcome.index, ...generated };
+      accepted.push(generated.recipe);
+    } catch (error) {
+      if (options.clientSignal?.aborted) throw error;
+      replacement = {
+        index: outcome.index,
+        error: publicHostedFailureReason(error),
+        retryable: isHostedCandidateRetryable(error),
+      };
+    }
+    const position = updated.findIndex((candidate) => candidate.index === outcome.index);
+    if (position >= 0) updated[position] = replacement;
+    done += 1;
+    options.onProgress?.(replacement, done, failed.length);
+  }
+  return updated.sort((left, right) => left.index - right.index);
 }
 
 /** 生成与桌面前端一致的 candidates SSE 契约。 */
@@ -1021,7 +1074,11 @@ async function generateHostedCandidates(
         outcome = { index, ...generated };
       } catch (error) {
         if (clientSignal.aborted) throw error;
-        outcome = { index, error: publicHostedFailureReason(error) };
+        outcome = {
+          index,
+          error: publicHostedFailureReason(error),
+          retryable: isHostedCandidateRetryable(error),
+        };
       }
       done += 1;
       if (count > 1 && !clientSignal.aborted) {
@@ -1112,12 +1169,16 @@ function emitHostedPicked(send: SseSender, selection: HostedSelection, round: nu
 }
 
 async function refineLowestHostedCandidate(
-  input: HostedCandidateFollowup & { send: SseSender; selection: HostedSelection },
+  input: HostedCandidateFollowup & {
+    send: SseSender;
+    selection: HostedSelection;
+    round: number;
+  },
 ): Promise<{ outcomes: HostedCandidateOutcome[]; selection: HostedSelection }> {
   const failed = input.outcomes.find((outcome) => !outcome.recipe);
   const targetIndex = failed?.index ?? input.selection.ranked.at(-1)!.index;
   const existing = input.outcomes.flatMap((outcome) => (outcome.recipe ? [outcome.recipe] : []));
-  input.send({ type: "candidates", stage: "start", n: 1, round: 1 });
+  input.send({ type: "candidates", stage: "start", n: 1, round: input.round });
 
   let replacement: HostedCandidateOutcome;
   try {
@@ -1150,7 +1211,7 @@ async function refineLowestHostedCandidate(
     stage: "progress",
     done: 1,
     total: 1,
-    round: 1,
+    round: input.round,
     result: hostedCandidateProgress(replacement),
   });
   if (!replacement.recipe) return { outcomes: input.outcomes, selection: input.selection };
@@ -1204,6 +1265,58 @@ async function generate(
           research,
           count,
         });
+        let candidateRound = 0;
+        if (
+          count === 3 &&
+          outcomes.some((outcome) => !outcome.recipe && outcome.retryable) &&
+          !generationSignal.aborted
+        ) {
+          candidateRound += 1;
+          const refillTotal = outcomes.filter(
+            (outcome) => !outcome.recipe && outcome.retryable,
+          ).length;
+          send({ type: "candidates", stage: "start", n: refillTotal, round: candidateRound });
+          const refillSignal = AbortSignal.any([
+            generationSignal,
+            AbortSignal.timeout(HOSTED_MAX_REFILL_BUDGET_MS),
+          ]);
+          outcomes = await refillHostedCandidateFailures(
+            outcomes,
+            async (index, accepted) => {
+              const previous = outcomes.find((outcome) => outcome.index === index);
+              if (previous?.error?.includes("请求较多")) {
+                await wait(HOSTED_CONCURRENCY_BACKOFF_MS, refillSignal);
+              }
+              return callModel(
+                connection,
+                description,
+                {
+                  ...body,
+                  candidate: index + 1,
+                  candidateRefill: candidateRound,
+                  ...(research?.summaryText ? { researchSummary: research.summaryText } : {}),
+                },
+                index,
+                3,
+                5_042 + index,
+                accepted,
+                refillSignal,
+              );
+            },
+            {
+              clientSignal,
+              onProgress: (outcome, done, total) =>
+                send({
+                  type: "candidates",
+                  stage: "progress",
+                  done,
+                  total,
+                  round: candidateRound,
+                  result: hostedCandidateProgress(outcome),
+                }),
+            },
+          );
+        }
         if (count === 3) {
           outcomes = await deduplicateHostedCandidates({
             outcomes,
@@ -1218,12 +1331,13 @@ async function generate(
         let selection = hostedCandidateSelection(outcomes);
         let refinementAttempted = false;
         if (count === 3) {
-          emitHostedPicked(send, selection, 0);
+          emitHostedPicked(send, selection, candidateRound);
           if (
             selection.winner.scoreReport.score < HOSTED_MAX_SCORE_TARGET &&
             !generationSignal.aborted
           ) {
             refinementAttempted = true;
+            candidateRound += 1;
             const refined = await refineLowestHostedCandidate({
               send,
               outcomes,
@@ -1233,10 +1347,11 @@ async function generate(
               connection,
               description,
               body,
+              round: candidateRound,
             });
             outcomes = refined.outcomes;
             selection = refined.selection;
-            emitHostedPicked(send, selection, 1);
+            emitHostedPicked(send, selection, candidateRound);
           }
         }
 

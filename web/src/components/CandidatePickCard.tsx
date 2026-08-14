@@ -12,6 +12,7 @@
 import { useState, type ReactNode } from "react";
 import type { CandidateScoreDetail, CandidateScoreSummary } from "../lib/api.js";
 import {
+  candidateDisplayCount,
   candidateDimensionLines,
   candidateHasDistinctScoreTie,
   candidatePickHeadline,
@@ -37,7 +38,9 @@ export default function CandidatePickCard({ state }: CandidatePickCardProps) {
   /** 任务 #121：获胜行逐维度明细展开开关 */
   const [dimsOpen, setDimsOpen] = useState(false);
   // 旧入口（detail/scores/winner）让位于 StreamPanel 主入口，避免同屏双卡
-  if (!state || state.total <= 1) return null;
+  if (!state) return null;
+  const displayCount = candidateDisplayCount(state);
+  if (displayCount <= 1) return null;
 
   const running = state.phase === "running";
   const winnerIndex = state.winner ?? state.detail?.winner;
@@ -91,7 +94,7 @@ export default function CandidatePickCard({ state }: CandidatePickCardProps) {
       {open && (
         <div className="border-t border-[var(--line)] px-4 pb-3">
           <ul>
-            {Array.from({ length: state.total }, (_, i) => {
+            {Array.from({ length: displayCount }, (_, i) => {
               const entry = state.results.find((r) => r.index === i);
               const isWinner = state.phase === "picked" && i === winnerIndex;
               const hasDistinctScoreTie = candidateHasDistinctScoreTie(entry, state.results);

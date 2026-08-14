@@ -9,7 +9,7 @@
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode, type UIEvent } from "react";
 import type { ResearchSource, ReviewFinding } from "../lib/api.js";
-import { parseCandidatesNote } from "../lib/candidates.js";
+import { candidateDisplayCount, parseCandidatesNote } from "../lib/candidates.js";
 import CandidatePickCard from "./CandidatePickCard.js";
 import { Card, CardHeader, Spinner } from "./ui.js";
 
@@ -74,7 +74,7 @@ export default function StreamPanel({
   // 任务 #120：doneNote 字符串通道解出结构化候选状态；N>1 时中栏始终渲染优选明细卡
   const candNote = parseCandidatesNote(doneNote);
   const candState = candNote.state;
-  const showPickCard = !!candState && candState.total > 1;
+  const showPickCard = !!candState && candidateDisplayCount(candState) > 1;
 
   useEffect(() => {
     const el = scrollRef.current;

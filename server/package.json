@@ -14,7 +14,7 @@
     "dotenv": "^17.4.2",
     "express": "^5.1.0",
     "undici": "^8.10.0",
-    "zod": "^4.0.5"
+    "zod": "^4.5.2"
   },
   "optionalDependencies": {
     "@abandonware/noble": "^1.9.2-26"

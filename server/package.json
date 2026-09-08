@@ -13,7 +13,7 @@
     "@xbloom/shared": "*",
     "dotenv": "^17.4.2",
     "express": "^5.1.0",
-    "undici": "^8.10.0",
+    "undici": "^8.10.2",
     "zod": "^4.0.5"
   },
   "optionalDependencies": {

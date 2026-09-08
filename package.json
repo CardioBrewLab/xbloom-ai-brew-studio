@@ -42,7 +42,7 @@
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "undici": "^8.10.0",
-    "zod": "^4.0.5"
+    "zod": "^4.5.4"
   },
   "optionalDependencies": {
     "@abandonware/noble": "^1.9.2-26"
